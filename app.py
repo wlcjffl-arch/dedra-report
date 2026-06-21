@@ -330,6 +330,10 @@ def kpi_card(label, value, sub="", accent_class=""):
         f'</div>'
     )
 
+def _set_state(key, value):
+    # 버튼 on_click 콜백: 리렌더 전에 상태를 갱신해 한 번 클릭으로 반영되게 한다.
+    st.session_state[key] = value
+
 def rate_accent(r):
     if r >= 35: return "accent-green"
     elif r >= 20: return "accent-amber"
@@ -852,14 +856,14 @@ def main():
             sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
             for k, v in discount_buckets.items():
                 is_sel = (k == sel_bucket)
-                if st.button(
+                st.button(
                     f"{k}　·　{v}건",
                     key=f"disc_bucket_{k}",
                     use_container_width=True,
                     type=("primary" if is_sel else "secondary"),
-                ):
-                    st.session_state["disc_bucket"] = k
-                    sel_bucket = k
+                    on_click=_set_state,
+                    args=("disc_bucket", k),
+                )
 
         with col_right:
             sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
