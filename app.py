@@ -158,7 +158,9 @@ html, body, [class*="css"] {
     border-radius: 16px;
     border: 1px solid #e2e8f0;
     box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.02);
-    overflow: hidden;
+    /* 긴 표는 세로 스크롤, 좁은 화면에선 가로 스크롤 */
+    max-height: 460px;
+    overflow: auto;
     margin-bottom: 20px;
 }
 .custom-table {
@@ -175,6 +177,20 @@ html, body, [class*="css"] {
     border-bottom: 1px solid #e2e8f0;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    /* 스크롤 시 헤더 고정 */
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+/* 합계 행 */
+.custom-table tr.total-row td {
+    background-color: #f8fafc;
+    font-weight: 700;
+    color: #0f172a;
+    border-top: 2px solid #cbd5e1;
+    border-bottom: none;
+    position: sticky;
+    bottom: 0;
 }
 .custom-table td {
     padding: 12px 20px;
@@ -288,19 +304,31 @@ html, body, [class*="css"] {
     padding-top: 2rem !important;
     padding-bottom: 2rem !important;
 }
+
+/* 좁은 화면 대응: KPI 그리드 열 수 축소 */
+@media (max-width: 1200px) {
+    .g6 { grid-template-columns: repeat(3, 1fr); }
+    .g4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 640px) {
+    .g6, .g4, .g3, .g2 { grid-template-columns: repeat(1, 1fr); }
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── 유틸 및 컴포넌트 ──────────────────────────────────────────
 def kpi_card(label, value, sub="", accent_class=""):
-    return f"""
-    <div class="kpi-card {accent_class}">
-        <div class="lbl">{label}</div>
-        <div class="val">{value}</div>
-        <div class="sub">{sub}</div>
-    </div>
-    """
+    # 줄바꿈/들여쓰기 없는 한 줄 HTML 로 반환한다. 선행 개행이 있으면
+    # st.markdown 의 dedent 과정에서 부모 템플릿에 공백만 있는 빈 줄이 생겨
+    # HTML 블록이 끊기고 태그가 텍스트로 노출될 수 있다. (html_table 과 동일 원인)
+    return (
+        f'<div class="kpi-card {accent_class}">'
+        f'<div class="lbl">{label}</div>'
+        f'<div class="val">{value}</div>'
+        f'<div class="sub">{sub}</div>'
+        f'</div>'
+    )
 
 def rate_accent(r):
     if r >= 35: return "accent-green"
@@ -325,25 +353,40 @@ def parse_csv(f):
         except: pass
     return []
 
-def html_table(data_dict, extra_col=None):
+def render_html(html):
+    # st.markdown 은 본문에 textwrap.dedent().strip() 을 적용한다.
+    # 동적으로 끼워 넣은 행(rows)들은 사이에 공백만 있는 빈 줄을 만들고,
+    # 이 빈 줄이 HTML 블록을 끊어 뒤따르는 들여쓰기된 <tr>/<td> 줄이
+    # 마크다운 코드블록으로 인식되어 태그가 그대로 텍스트로 노출된다.
+    # 모든 줄의 들여쓰기를 제거하고 빈 줄을 없애 하나의 연속된
+    # HTML 블록으로 만들어 항상 정상 렌더링되도록 한다.
+    clean = "\n".join(ln.strip() for ln in html.splitlines() if ln.strip())
+    st.markdown(clean, unsafe_allow_html=True)
+
+def html_table(data_dict, extra_col=None, cat_map=None):
     sorted_items = sorted(data_dict.items(), key=lambda x: -x[1]["revenue"])
     if not sorted_items:
-        return "<div style='color:#94a3b8;font-size:13px;padding:24px;text-align:center;'>데이터가 없습니다.</div>"
-        
+        render_html("<div style='color:#94a3b8;font-size:13px;padding:24px;text-align:center;background:white;border-radius:16px;border:1px solid #e2e8f0;margin-bottom:20px;'>데이터가 없습니다.</div>")
+        return
+
     extra_header = f'<th style="text-align:right;">{extra_col[0]}</th>' if extra_col else ""
-    
+    # cat_map(상품명→판매카테고리)이 주어지면 '항목' 옆에 판매카테고리 열을 끼운다.
+    cat_header = '<th>판매카테고리</th>' if cat_map is not None else ""
+
     rows_html = []
     for name, s in sorted_items:
         r = margin_rate(s)
         color = "#10b981" if r>=35 else "#f59e0b" if r>=20 else "#ef4444"
-        
+
         extra_val = ""
         if extra_col:
             extra_val = f'<td style="text-align:right;font-weight:600;">{extra_col[1](s)}</td>'
-            
+        cat_val = f'<td style="color:#64748b;">{cat_map.get(name, "-")}</td>' if cat_map is not None else ""
+
         rows_html.append(f"""
         <tr>
             <td style="font-weight:600;color:#1e293b;">{name}</td>
+            {cat_val}
             <td style="text-align:right;font-weight:500;">{fmt_won(s['revenue'])}</td>
             <td style="text-align:right;color:#64748b;">{fmt_won(s['cost'])}</td>
             <td style="text-align:right;font-weight:600;color:#0f172a;">{fmt_won(margin(s))}</td>
@@ -352,13 +395,34 @@ def html_table(data_dict, extra_col=None):
             {extra_val}
         </tr>
         """)
-        
+
+    # 합계 행 — 전체 항목을 합산해 맨 아래 고정 표기
+    tot = {"revenue": 0.0, "cost": 0.0, "qty": 0.0}
+    for _, s in sorted_items:
+        tot["revenue"] += s["revenue"]; tot["cost"] += s["cost"]; tot["qty"] += s["qty"]
+    tot_r = margin_rate(tot)
+    tot_cat = '<td>—</td>' if cat_map is not None else ""
+    tot_extra = f'<td style="text-align:right;">{extra_col[1](tot)}</td>' if extra_col else ""
+    total_row = f"""
+    <tr class="total-row">
+        <td>합계</td>
+        {tot_cat}
+        <td style="text-align:right;">{fmt_won(tot['revenue'])}</td>
+        <td style="text-align:right;">{fmt_won(tot['cost'])}</td>
+        <td style="text-align:right;">{fmt_won(tot['revenue'] - tot['cost'])}</td>
+        <td style="text-align:right;">{tot_r:.1f}%</td>
+        <td style="text-align:right;">{int(tot['qty']):,}개</td>
+        {tot_extra}
+    </tr>
+    """
+
     table_content = f"""
     <div class="custom-table-wrapper">
         <table class="custom-table">
             <thead>
                 <tr>
                     <th>항목</th>
+                    {cat_header}
                     <th style="text-align:right;">순매출</th>
                     <th style="text-align:right;">공급원가</th>
                     <th style="text-align:right;">마진</th>
@@ -369,11 +433,12 @@ def html_table(data_dict, extra_col=None):
             </thead>
             <tbody>
                 {"".join(rows_html)}
+                {total_row}
             </tbody>
         </table>
     </div>
     """
-    st.markdown(table_content, unsafe_allow_html=True)
+    render_html(table_content)
 
 
 # ── 로그인 화면 ───────────────────────────────────────────────
@@ -446,9 +511,12 @@ def main():
         """, unsafe_allow_html=True)
         return
 
-    # 데이터 처리
-    all_rows, file_names = [], []
+    # 데이터 처리 — 같은 파일명은 한 번만 반영(중복 업로드 시 이중 합산 방지)
+    all_rows, file_names, skipped = [], [], []
     for f in uploaded:
+        if f.name in file_names:
+            skipped.append(f.name)
+            continue
         rows = parse_csv(f)
         if rows:
             all_rows.extend(rows)
@@ -458,11 +526,14 @@ def main():
         premium_banner("err", "파일 데이터를 읽을 수 없습니다. 인코딩 형식을 확인해 주세요.")
         return
 
+    if skipped:
+        premium_banner("warn", f"중복된 파일명은 한 번만 반영했습니다: {', '.join(sorted(set(skipped)))}")
+
     with st.spinner("주문 내역 정밀 마진 분석 중..."):
         enriched = preprocess_rows(all_rows)
         data = aggregate(enriched)
         price_anomalies, outlet_items = detect_price_anomalies(enriched)
-        discount_over, discount_buckets = detect_discount_anomalies(enriched)
+        discount_over, discount_buckets, discount_bucket_products = detect_discount_anomalies(enriched)
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 상단 대시보드 헤더
@@ -561,7 +632,8 @@ def main():
         st.markdown("<hr style='border-color:#e2e8f0;margin:24px 0'>", unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         items = [(k, v) for k, v in data.get("product_normal", {}).items() if v["qty"] >= 2]
-        
+        empty_msg = "<div style='color:#94a3b8;font-size:13px;padding:24px;text-align:center;background:white;border-radius:16px;border:1px solid #e2e8f0;'>집계할 상품이 없습니다 (수량 2개 이상 기준).</div>"
+
         with c1:
             section_title("최우수 상품 마진율 TOP 10 (정상 판매)")
             top = sorted(items, key=lambda x: -margin_rate(x[1]))[:10]
@@ -577,7 +649,7 @@ def main():
                         <td style="text-align:right;color:#64748b;">{int(s_p['qty'])}개</td>
                     </tr>
                     """)
-                st.markdown(f"""
+                render_html(f"""
                 <div class="custom-table-wrapper">
                     <table class="custom-table">
                         <thead>
@@ -592,8 +664,10 @@ def main():
                         <tbody>{"".join(table_rows)}</tbody>
                     </table>
                 </div>
-                """, unsafe_allow_html=True)
-                
+                """)
+            else:
+                render_html(empty_msg)
+
         with c2:
             section_title("마진 저조/경고 상품 BOT 10 (정상 판매)")
             bot = sorted(items, key=lambda x: margin_rate(x[1]))[:10]
@@ -611,7 +685,7 @@ def main():
                         <td style="text-align:right;color:#64748b;">{int(s_p['qty'])}개</td>
                     </tr>
                     """)
-                st.markdown(f"""
+                render_html(f"""
                 <div class="custom-table-wrapper">
                     <table class="custom-table">
                         <thead>
@@ -626,7 +700,9 @@ def main():
                         <tbody>{"".join(table_rows)}</tbody>
                     </table>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
+            else:
+                render_html(empty_msg)
 
     # ── 탭 2: 판매가 이상 감지 ────────────────────────────────
     with t2:
@@ -644,12 +720,14 @@ def main():
                         <td style="font-weight:600;color:#4f46e5;">{a['주문번호']}</td>
                         <td>{a['상품명']}</td>
                         <td style="color:#64748b;">{a['브랜드']}</td>
+                        <td style="color:#64748b;">{a['카테고리']}</td>
                         <td style="text-align:right;font-weight:600;">{fmt_won(a['판매가'])}</td>
+                        <td style="text-align:right;color:#94a3b8;">{fmt_won(a['공급원가'])}</td>
                         <td style="text-align:right;color:#94a3b8;">{fmt_won(a['기준가'])}</td>
                         <td style="text-align:right;font-weight:700;color:#ef4444;">{fmt_won(a['차이'])}</td>
                     </tr>
                     """)
-                st.markdown(f"""
+                render_html(f"""
                 <div class="custom-table-wrapper">
                     <table class="custom-table">
                         <thead>
@@ -657,7 +735,9 @@ def main():
                                 <th>주문번호</th>
                                 <th>상품명</th>
                                 <th>브랜드</th>
+                                <th>판매카테고리</th>
                                 <th style="text-align:right;">판매가</th>
+                                <th style="text-align:right;">원가</th>
                                 <th style="text-align:right;">정상 기준가</th>
                                 <th style="text-align:right;">차액</th>
                             </tr>
@@ -665,7 +745,7 @@ def main():
                         <tbody>{"".join(rows)}</tbody>
                     </table>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
                 
         with col2:
             section_title("아울렛 전용 상품 판매 현황")
@@ -678,25 +758,29 @@ def main():
                     <tr>
                         <td style="font-weight:600;color:#1e293b;">{a['상품명']}</td>
                         <td style="color:#64748b;">{a['브랜드']}</td>
+                        <td style="color:#64748b;">{a['카테고리']}</td>
                         <td style="text-align:right;font-weight:600;">{fmt_won(a['판매가'])}</td>
+                        <td style="text-align:right;color:#94a3b8;">{fmt_won(a['공급원가'])}</td>
                         <td style="text-align:right;font-weight:700;color:#4f46e5;">{a['원가회수율']:.1f}%</td>
                     </tr>
                     """)
-                st.markdown(f"""
+                render_html(f"""
                 <div class="custom-table-wrapper">
                     <table class="custom-table">
                         <thead>
                             <tr>
                                 <th>상품명</th>
                                 <th>브랜드</th>
+                                <th>판매카테고리</th>
                                 <th style="text-align:right;">판매가</th>
+                                <th style="text-align:right;">원가</th>
                                 <th style="text-align:right;">원가회수율</th>
                             </tr>
                         </thead>
                         <tbody>{"".join(rows)}</tbody>
                     </table>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
 
         # 쿠폰 오남용 경고
         st.markdown("<hr style='border-color:#e2e8f0;margin:24px 0'>", unsafe_allow_html=True)
@@ -711,20 +795,22 @@ def main():
                 rows.append(f"""
                 <tr>
                     <td style="font-weight:600;color:#4f46e5;">{w['주문번호']}</td>
-                    <td style="color:#64748b;">{w['카테고리']}</td>
+                    <td style="color:#64748b;">{w['판매카테고리']}</td>
                     <td>{w['상품명']}</td>
+                    <td style="text-align:right;color:#94a3b8;">{fmt_won(w['원가'])}</td>
                     <td style="font-weight:600;color:#ef4444;">{w['쿠폰명']}</td>
                     <td style="text-align:right;font-weight:700;color:#ef4444;">{fmt_won(w['쿠폰할인액'])}</td>
                 </tr>
                 """)
-            st.markdown(f"""
+            render_html(f"""
             <div class="custom-table-wrapper">
                 <table class="custom-table">
                     <thead>
                         <tr>
                             <th>주문번호</th>
-                            <th>카테고리</th>
+                            <th>판매카테고리</th>
                             <th>상품명</th>
+                            <th style="text-align:right;">원가</th>
                             <th>적용 쿠폰</th>
                             <th style="text-align:right;">쿠폰할인액</th>
                         </tr>
@@ -732,7 +818,7 @@ def main():
                     <tbody>{"".join(rows)}</tbody>
                 </table>
             </div>
-            """, unsafe_allow_html=True)
+            """)
 
     # ── 탭 3: 할인율 입체 분석 ────────────────────────────────
     with t3:
@@ -761,49 +847,48 @@ def main():
 
         col_left, col_right = st.columns([1, 2])
         with col_left:
-            section_title("주문별 할인율 구간 분포")
-            rows = []
+            section_title("상품별 할인율 구간 분포")
+            st.caption("구간을 클릭하면 오른쪽에 해당 상품이 할인율 높은 순으로 표시됩니다.")
+            sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
             for k, v in discount_buckets.items():
-                rows.append(f"""
-                <tr>
-                    <td style="font-weight:600;">{k}</td>
-                    <td style="text-align:right;font-weight:600;color:#4f46e5;">{v}건</td>
-                </tr>
-                """)
-            st.markdown(f"""
-            <div class="custom-table-wrapper">
-                <table class="custom-table">
-                    <thead>
-                        <tr>
-                            <th>할인율 범위</th>
-                            <th style="text-align:right;">주문 건수</th>
-                        </tr>
-                    </thead>
-                    <tbody>{"".join(rows)}</tbody>
-                </table>
-            </div>
-            """, unsafe_allow_html=True)
-            
+                is_sel = (k == sel_bucket)
+                if st.button(
+                    f"{k}　·　{v}건",
+                    key=f"disc_bucket_{k}",
+                    use_container_width=True,
+                    type=("primary" if is_sel else "secondary"),
+                ):
+                    st.session_state["disc_bucket"] = k
+                    sel_bucket = k
+
         with col_right:
-            section_title("고할인율 경고 주문 (25% 초과)")
-            if not discount_over:
-                premium_banner("ok", "25%를 초과하는 고할인율 결제 건이 없습니다.")
+            sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
+            items = discount_bucket_products.get(sel_bucket, [])
+            section_title(f"‘{sel_bucket}’ 구간 상품 (할인율 높은 순 · {len(items)}건)")
+            if sel_bucket == "25% 초과" and items:
+                premium_banner("warn", f"25%를 초과하는 고할인율 상품이 {len(items)}건 발견되었습니다.")
+            if not items:
+                premium_banner("ok", "해당 구간에 표시할 상품이 없습니다.")
             else:
-                premium_banner("warn", f"25%를 초과하는 고할인율 주문이 {len(discount_over)}건 발견되었습니다.")
                 rows = []
-                for o in discount_over:
+                for o in items:
+                    rr = o['할인율']
+                    rc = "#ef4444" if rr > 25 else "#f59e0b" if rr > 15 else "#64748b"
                     rows.append(f"""
                     <tr>
                         <td style="font-weight:600;color:#4f46e5;">{o['주문번호']}</td>
                         <td>{o['상품명']}</td>
                         <td style="color:#64748b;">{o['브랜드']}</td>
+                        <td style="color:#64748b;">{o['판매카테고리']}</td>
                         <td style="text-align:right;">{fmt_won(o['판매가'])}</td>
-                        <td style="text-align:right;font-weight:600;color:#ef4444;">{fmt_won(o['할인금액'])}</td>
-                        <td style="text-align:right;font-weight:700;color:#ef4444;">{o['할인율']:.1f}%</td>
+                        <td style="text-align:right;color:#94a3b8;">{fmt_won(o['원가'])}</td>
+                        <td style="text-align:right;font-weight:600;color:{rc};">{fmt_won(o['할인금액'])}</td>
+                        <td style="text-align:right;font-weight:600;color:#0f172a;">{fmt_won(o['판매가'] - o['할인금액'])}</td>
+                        <td style="text-align:right;font-weight:700;color:{rc};">{rr:.1f}%</td>
                         <td style="font-size:11px;color:#64748b;">{o['쿠폰명']}</td>
                     </tr>
                     """)
-                st.markdown(f"""
+                render_html(f"""
                 <div class="custom-table-wrapper">
                     <table class="custom-table">
                         <thead>
@@ -811,8 +896,11 @@ def main():
                                 <th>주문번호</th>
                                 <th>상품명</th>
                                 <th>브랜드</th>
-                                <th style="text-align:right;">실구매가</th>
+                                <th>판매카테고리</th>
+                                <th style="text-align:right;">판매가</th>
+                                <th style="text-align:right;">원가</th>
                                 <th style="text-align:right;">할인액</th>
+                                <th style="text-align:right;">실구매가</th>
                                 <th style="text-align:right;">할인율</th>
                                 <th>적용쿠폰</th>
                             </tr>
@@ -820,7 +908,7 @@ def main():
                         <tbody>{"".join(rows)}</tbody>
                     </table>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
 
     # ── 탭 4: PG 수수료 명세 ──────────────────────────────────
     with t4:
@@ -840,7 +928,9 @@ def main():
         pg_rows = sorted(pg_by.items(), key=lambda x: -x[1]["revenue"])
         if pg_rows:
             rows = []
+            t_rev = t_fee = t_cnt = 0.0
             for name, s in pg_rows:
+                t_rev += s['revenue']; t_fee += s['pg_fee']; t_cnt += s['count']
                 rows.append(f"""
                 <tr>
                     <td style="font-weight:600;color:#0f172a;">{name}</td>
@@ -850,7 +940,17 @@ def main():
                     <td style="text-align:right;color:#64748b;">{s['count']:,}건</td>
                 </tr>
                 """)
-            st.markdown(f"""
+            avg_rate = (t_fee / t_rev * 100) if t_rev else 0
+            total_row = f"""
+            <tr class="total-row">
+                <td>합계</td>
+                <td style="text-align:right;">{fmt_won(t_rev)}</td>
+                <td style="text-align:right;">{avg_rate:.2f}%</td>
+                <td style="text-align:right;">{fmt_won(t_fee)}</td>
+                <td style="text-align:right;">{int(t_cnt):,}건</td>
+            </tr>
+            """
+            render_html(f"""
             <div class="custom-table-wrapper">
                 <table class="custom-table">
                     <thead>
@@ -862,10 +962,12 @@ def main():
                             <th style="text-align:right;">결제 건수</th>
                         </tr>
                     </thead>
-                    <tbody>{"".join(rows)}</tbody>
+                    <tbody>{"".join(rows)}{total_row}</tbody>
                 </table>
             </div>
-            """, unsafe_allow_html=True)
+            """)
+        else:
+            premium_banner("ok", "표시할 PG 수수료 내역이 없습니다.")
 
         # 영업이익 산식 도식화
         section_title("실 영업이익 산출 공식 흐름")
@@ -916,7 +1018,19 @@ def main():
             products = data["product_by_clearance_cat"].get(cat, {})
             if products:
                 section_title(f"{cat} 카테고리 내 상품별 상세 실적")
-                html_table(products, extra_col=("원가회수율", lambda s: fmt_rate(recovery_rate(s))))
+                # 상품명 → 판매카테고리(메인카테고리 이름) 매핑
+                prod_cat = {}
+                for rr in enriched:
+                    if rr.get("_skip"):
+                        continue
+                    pn = rr.get("상품명(데드라)", "").strip()
+                    if pn and pn not in prod_cat:
+                        prod_cat[pn] = rr.get("메인카테고리 이름", "").strip()
+                html_table(
+                    products,
+                    extra_col=("원가회수율", lambda s: fmt_rate(recovery_rate(s))),
+                    cat_map=prod_cat,
+                )
 
 
 if __name__ == "__main__":

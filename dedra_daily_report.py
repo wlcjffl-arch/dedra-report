@@ -249,7 +249,12 @@ def detect_price_anomalies(enriched_rows):
                 "기준가": threshold,
                 "원가회수율": (unit_price / unit_cost * 100) if unit_cost else 0,
                 "상품별추가할인": safe_float(r.get("상품별 추가할인금액")),
-                "쿠폰할인": safe_float(r.get("주문서 쿠폰 할인금액")),
+                # 주문서 쿠폰은 주문 전체에 1건 걸리지만 CSV 는 모든 품목 행에
+                # 같은 금액을 반복 기재한다(3개 구매 시 3행 모두 15000).
+                # 원본 값을 그대로 쓰면 품목마다 중복 표기되므로,
+                # preprocess_rows 가 판매가(상품구매금액) 비율로 배분해 둔
+                # _alloc_coupon 을 사용한다.
+                "쿠폰할인": r.get("_alloc_coupon", 0.0),
             })
             continue
 
@@ -293,62 +298,59 @@ def detect_price_anomalies(enriched_rows):
 
 def detect_discount_anomalies(enriched_rows):
     """
-    주문 단위 할인율 이상감지 (25% 초과) 및 구간별 집계.
-    할인율 = (상품별할인 + 쿠폰 + 등급할인) / 구매금액 × 100
-    적립금·예치금은 순수 할인이 아니므로 할인율 계산에서 제외.
+    상품(주문 내 품목) 단위 할인율 이상감지 (25% 초과) 및 구간별 집계.
+    할인율 = (상품별할인 + 배분된 쿠폰 + 배분된 등급할인) / 상품구매금액 × 100
+
+    주문서 쿠폰·회원등급 할인은 주문 전체에 1건만 부과되지만 CSV 는 모든 품목 행에
+    같은 금액을 반복 기재한다(예: 2품목 주문에 9,200원 쿠폰이 두 행 모두 9,200).
+    그대로 합산하면 중복되므로, preprocess_rows 가 판매가(상품구매금액) 비율로
+    배분해 둔 _disc_for_anomaly(상품별할인 + 배분쿠폰 + 배분등급)를 그대로 사용한다.
+    적립금·예치금은 순수 할인이 아니라 _disc_for_anomaly 에서 이미 제외돼 있다.
+
+    이전에는 주문 단위로 합산해 첫 품목 이름만 붙였더니, 다품목 주문이
+    엉뚱한 한 상품에 주문 전체 금액으로 표시됐다. 이제 품목별로 평가한다.
     """
-    order_agg = {}   # order_no → {purchase, discount, first_product_info}
+    buckets = {"0%": 0, "1~10%": 0, "11~15%": 0, "16~25%": 0, "25% 초과": 0}
+    # 구간별 상품 목록(드릴다운용). 각 구간을 클릭하면 해당 상품들을 보여준다.
+    bucket_products = {k: [] for k in buckets}
+
+    def _bucket_of(rate):
+        if rate <= 0:  return "0%"
+        if rate <= 10: return "1~10%"
+        if rate <= 15: return "11~15%"
+        if rate <= 25: return "16~25%"
+        return "25% 초과"
 
     for r in enriched_rows:
         if r.get("_skip"):
             continue
-        no = r.get("주문번호", "").strip()
         purchase = safe_float(r.get("상품구매금액"))
-        if no not in order_agg:
-            order_agg[no] = {
-                "purchase": 0.0, "discount": 0.0,
-                "상품명": r.get("상품명(데드라)", "").strip(),
-                "브랜드": parse_brand(r.get("브랜드")),
-                "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
-                "할인상세_set": set(),
-            }
-        order_agg[no]["purchase"] += purchase
-        order_agg[no]["discount"] += r.get("_disc_for_anomaly", 0.0)
-        detail = r.get("상품별 추가할인 상세", "").strip()
-        if detail:
-            order_agg[no]["할인상세_set"].add(detail)
-
-    over_threshold = []
-    buckets = {"0%": 0, "1~10%": 0, "11~15%": 0, "16~25%": 0, "25% 초과": 0}
-
-    for no, d in order_agg.items():
-        if d["purchase"] == 0:
+        if purchase == 0:
             continue
-        disc_rate = d["discount"] / d["purchase"] * 100
+        discount = r.get("_disc_for_anomaly", 0.0)
+        disc_rate = discount / purchase * 100
 
-        if disc_rate == 0:
-            buckets["0%"] += 1
-        elif disc_rate <= 10:
-            buckets["1~10%"] += 1
-        elif disc_rate <= 15:
-            buckets["11~15%"] += 1
-        elif disc_rate <= 25:
-            buckets["16~25%"] += 1
-        else:
-            buckets["25% 초과"] += 1
-            over_threshold.append({
-                "주문번호": no,
-                "상품명": d["상품명"],
-                "브랜드": d["브랜드"],
-                "판매가": d["purchase"],
-                "할인금액": d["discount"],
-                "할인율": disc_rate,
-                "쿠폰명": d["쿠폰명"],
-                "할인상세": ", ".join(sorted(d["할인상세_set"])),
-            })
+        label = _bucket_of(disc_rate)
+        buckets[label] += 1
+        bucket_products[label].append({
+            "주문번호": r.get("주문번호", "").strip(),
+            "상품명": r.get("상품명(데드라)", "").strip(),
+            "브랜드": parse_brand(r.get("브랜드")),
+            "판매카테고리": r.get("메인카테고리 이름", "").strip(),
+            "판매가": purchase,
+            "원가": r.get("_cost", 0.0),
+            "할인금액": discount,
+            "할인율": disc_rate,
+            "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
+            "할인상세": r.get("상품별 추가할인 상세", "").strip(),
+        })
 
-    over_threshold.sort(key=lambda x: -x["할인율"])
-    return over_threshold, buckets
+    # 각 구간을 할인율 높은 순으로 정렬
+    for k in bucket_products:
+        bucket_products[k].sort(key=lambda x: -x["할인율"])
+
+    over_threshold = bucket_products["25% 초과"]
+    return over_threshold, buckets, bucket_products
 
 
 # ── 마진 집계 ─────────────────────────────────────────────────
@@ -414,8 +416,9 @@ def aggregate(enriched_rows):
             if alloc_coupon > 0 or coupon_name:
                 coupon_warnings.append({
                     "주문번호": order_no,
-                    "카테고리": cat,
+                    "판매카테고리": cat,
                     "상품명": prod,
+                    "원가": r["_cost"],
                     "쿠폰명": coupon_name,
                     "쿠폰할인액": alloc_coupon,
                 })
@@ -639,7 +642,7 @@ def build_price_anomaly_html(anomalies):
         </p>
         <div class="table-wrap"><table>
             <thead><tr>
-                <th>주문번호</th><th>상품명</th><th>브랜드</th><th>카테고리</th>
+                <th>주문번호</th><th>상품명</th><th>브랜드</th><th>판매카테고리</th>
                 <th>판매가(단가)</th><th>공급원가(단가)</th><th>기준가</th><th>차이금액</th>
             </tr></thead>
             <tbody>{rows}</tbody>
@@ -681,9 +684,9 @@ def build_outlet_price_html(outlet_items):
         <p class="outlet-desc">자체분류 '아울렛' 상품은 재고소진 목적으로 기준가 이하 판매가 허용됩니다. 판매가 이상감지에서 제외되며 아래에 현황만 표시합니다.</p>
         <div class="table-wrap"><table>
             <thead><tr>
-                <th>주문번호</th><th>상품명</th><th>브랜드</th><th>카테고리</th>
+                <th>주문번호</th><th>상품명</th><th>브랜드</th><th>판매카테고리</th>
                 <th class="num">판매가(단가)</th><th class="num">공급원가(단가)</th><th class="num">원가회수율</th>
-                <th class="num">상품별 추가할인</th><th class="num">주문서 쿠폰 할인</th>
+                <th class="num">상품별 추가할인</th><th class="num">주문서 쿠폰 할인(배분)</th>
             </tr></thead>
             <tbody>{rows}</tbody>
         </table></div>
@@ -710,7 +713,7 @@ def build_discount_anomaly_html(over_threshold, buckets):
         )
 
     if not over_threshold:
-        order_table = '<p style="color:#2e7d32;margin-top:12px">✅ 25% 초과 주문 없음</p>'
+        order_table = '<p style="color:#2e7d32;margin-top:12px">✅ 25% 초과 상품 없음</p>'
     else:
         order_rows = ""
         for o in over_threshold:
@@ -719,7 +722,9 @@ def build_discount_anomaly_html(over_threshold, buckets):
                 f'<td>{o["주문번호"]}</td>'
                 f'<td>{o["상품명"]}</td>'
                 f'<td>{o["브랜드"]}</td>'
+                f'<td>{o["판매카테고리"]}</td>'
                 f'<td class="num">{fmt_won(o["판매가"])}</td>'
+                f'<td class="num">{fmt_won(o["원가"])}</td>'
                 f'<td class="num warn-val">{fmt_won(o["할인금액"])}</td>'
                 f'<td class="num warn-val"><b>{fmt_rate(o["할인율"])}</b></td>'
                 f'<td>{o["쿠폰명"]}</td>'
@@ -727,11 +732,11 @@ def build_discount_anomaly_html(over_threshold, buckets):
                 f'</tr>'
             )
         order_table = f"""
-        <h3 style="margin:16px 0 8px;font-size:14px;color:#c62828">할인율 25% 초과 주문 ({len(over_threshold)}건)</h3>
+        <h3 style="margin:16px 0 8px;font-size:14px;color:#c62828">할인율 25% 초과 상품 ({len(over_threshold)}건)</h3>
         <div class="table-wrap"><table>
             <thead><tr>
-                <th>주문번호</th><th>상품명</th><th>브랜드</th>
-                <th>판매가</th><th>할인금액</th><th>할인율</th><th>쿠폰명</th><th>상품별 추가할인 상세</th>
+                <th>주문번호</th><th>상품명</th><th>브랜드</th><th>판매카테고리</th>
+                <th>판매가</th><th>원가</th><th>할인금액</th><th>할인율</th><th>쿠폰명</th><th>상품별 추가할인 상세</th>
             </tr></thead>
             <tbody>{order_rows}</tbody>
         </table></div>"""
@@ -755,7 +760,8 @@ def build_coupon_warning_html(warnings):
         return '<div class="section ok-section"><h2>✅ 재고소진 쿠폰 경고 — 이상 없음</h2></div>'
     rows = "".join(
         f'<tr>'
-        f'<td>{w["주문번호"]}</td><td>{w["카테고리"]}</td><td>{w["상품명"]}</td>'
+        f'<td>{w["주문번호"]}</td><td>{w["판매카테고리"]}</td><td>{w["상품명"]}</td>'
+        f'<td class="num">{fmt_won(w["원가"])}</td>'
         f'<td>{w["쿠폰명"]}</td><td class="num warn-val">{fmt_won(w["쿠폰할인액"])}</td>'
         f'</tr>'
         for w in warnings
@@ -765,7 +771,7 @@ def build_coupon_warning_html(warnings):
         <h2>⚠️ 재고소진 카테고리 쿠폰 적용 경고 ({len(warnings)}건)</h2>
         <p class="warn-desc">재고소진 카테고리에 쿠폰이 적용되어 원가를 회수하지 못할 수 있습니다. 해당 카테고리의 쿠폰 적용 제외 처리를 권장합니다.</p>
         <div class="table-wrap"><table>
-            <thead><tr><th>주문번호</th><th>카테고리</th><th>상품명</th><th>쿠폰명</th><th>쿠폰할인액(배분)</th></tr></thead>
+            <thead><tr><th>주문번호</th><th>판매카테고리</th><th>상품명</th><th class="num">원가</th><th>쿠폰명</th><th>쿠폰할인액(배분)</th></tr></thead>
             <tbody>{rows}</tbody>
         </table></div>
     </div>"""
@@ -1867,7 +1873,7 @@ def main():
     enriched = preprocess_rows(rows)
     data = aggregate(enriched)
     price_anomalies, outlet_items = detect_price_anomalies(enriched)
-    discount_over, discount_buckets = detect_discount_anomalies(enriched)
+    discount_over, discount_buckets, _ = detect_discount_anomalies(enriched)
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     date_prefix = datetime.now().strftime("%Y%m%d")
