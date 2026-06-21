@@ -1,0 +1,19 @@
+# Streamlit secrets (절대 GitHub에 올리지 않음)
+.streamlit/secrets.toml
+
+# 데이터 파일 (용량이 크고 민감한 데이터)
+*.csv
+*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
