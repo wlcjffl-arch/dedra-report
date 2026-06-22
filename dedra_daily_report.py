@@ -1485,10 +1485,23 @@ def build_unified_sales_section(enriched_rows):
 
 PENDING_STATUS = "반품 처리중 - 수거전"
 
-def build_refund_section(enriched_rows):
-    if not enriched_rows:
-        return ""
+def compute_refund_stats(enriched_rows):
+    """
+    환불(취소/반품완료) 및 반품진행중 통계를 구조화 데이터로 집계.
+    HTML 리포트(build_refund_section)와 Streamlit 앱이 함께 사용하는 단일 소스.
 
+    금액 기준은 상품구매금액(소비자 결제 기준 주문금액)이며,
+    _skip(SKIP_STATUSES) 행을 환불, PENDING_STATUS 행을 반품진행중으로 본다.
+
+    반환:
+      {
+        "brand_stats", "cat_stats", "prod_stats": 집계 dict,
+        "total_cnt", "refund_cnt", "pending_cnt": 건수,
+        "amount_all": 환불 포함 전체 주문금액,
+        "amount_ref": 환불 금액, "amount_pend": 반품진행중 금액,
+        "rate_cnt": 건수 기준 환불율(%), "rate_amt": 금액 기준 환불율(%),
+      }
+    """
     def new_stat():
         return {"total": 0, "refund": 0, "pending": 0,
                 "amount_all": 0.0, "amount_ref": 0.0, "amount_pend": 0.0}
@@ -1528,6 +1541,37 @@ def build_refund_section(enriched_rows):
 
         if not is_ref and not is_pend:
             ps["qty"] += qty
+
+    total_cnt   = sum(d["total"]       for d in brand_stats.values())
+    refund_cnt  = sum(d["refund"]      for d in brand_stats.values())
+    pending_cnt = sum(d["pending"]     for d in brand_stats.values())
+    amount_all  = sum(d["amount_all"]  for d in brand_stats.values())
+    amount_ref  = sum(d["amount_ref"]  for d in brand_stats.values())
+    amount_pend = sum(d["amount_pend"] for d in brand_stats.values())
+
+    return {
+        "brand_stats": dict(brand_stats),
+        "cat_stats":   dict(cat_stats),
+        "prod_stats":  prod_stats,
+        "total_cnt":   total_cnt,
+        "refund_cnt":  refund_cnt,
+        "pending_cnt": pending_cnt,
+        "amount_all":  amount_all,
+        "amount_ref":  amount_ref,
+        "amount_pend": amount_pend,
+        "rate_cnt":    (refund_cnt / total_cnt * 100) if total_cnt else 0.0,
+        "rate_amt":    (amount_ref / amount_all * 100) if amount_all else 0.0,
+    }
+
+
+def build_refund_section(enriched_rows):
+    if not enriched_rows:
+        return ""
+
+    rstats = compute_refund_stats(enriched_rows)
+    brand_stats = rstats["brand_stats"]
+    cat_stats   = rstats["cat_stats"]
+    prod_stats  = rstats["prod_stats"]
 
     def ref_rate(d):
         return (d["refund"] / d["total"] * 100) if d["total"] else 0.0
@@ -1602,14 +1646,14 @@ def build_refund_section(enriched_rows):
         for name, d in prod_rows
     )
 
-    # 전체 요약
-    total_cnt    = sum(d["total"]       for d in brand_stats.values())
-    refund_cnt   = sum(d["refund"]      for d in brand_stats.values())
-    pending_cnt  = sum(d["pending"]     for d in brand_stats.values())
-    total_amt    = sum(d["amount_all"]  for d in brand_stats.values())
-    refund_amt   = sum(d["amount_ref"]  for d in brand_stats.values())
-    pending_amt  = sum(d["amount_pend"] for d in brand_stats.values())
-    overall_rate = (refund_cnt / total_cnt * 100) if total_cnt else 0.0
+    # 전체 요약 — compute_refund_stats 가 집계한 값을 그대로 사용
+    total_cnt    = rstats["total_cnt"]
+    refund_cnt   = rstats["refund_cnt"]
+    pending_cnt  = rstats["pending_cnt"]
+    total_amt    = rstats["amount_all"]
+    refund_amt   = rstats["amount_ref"]
+    pending_amt  = rstats["amount_pend"]
+    overall_rate = rstats["rate_cnt"]
     rate_cls     = "ref-hi" if overall_rate >= 20 else ("ref-mid" if overall_rate >= 10 else "")
 
     pend_kpi = (

@@ -4,6 +4,7 @@
 
 import io, csv, sys, os
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -12,7 +13,7 @@ from dedra_daily_report import (
     detect_price_anomalies, detect_discount_anomalies,
     generate_html, margin, margin_rate, fmt_won, fmt_rate,
 )
-from dedra_daily_report import recovery_rate
+from dedra_daily_report import recovery_rate, compute_refund_stats
 
 # ── 페이지 설정 ───────────────────────────────────────────────
 st.set_page_config(
@@ -83,6 +84,7 @@ html, body, [class*="css"] {
 .g3 { grid-template-columns: repeat(3, 1fr); }
 .g4 { grid-template-columns: repeat(4, 1fr); }
 .g6 { grid-template-columns: repeat(6, 1fr); }
+.g7 { grid-template-columns: repeat(7, 1fr); }
 
 .kpi-card {
     background: white;
@@ -307,11 +309,12 @@ html, body, [class*="css"] {
 
 /* 좁은 화면 대응: KPI 그리드 열 수 축소 */
 @media (max-width: 1200px) {
+    .g7 { grid-template-columns: repeat(4, 1fr); }
     .g6 { grid-template-columns: repeat(3, 1fr); }
     .g4 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
-    .g6, .g4, .g3, .g2 { grid-template-columns: repeat(1, 1fr); }
+    .g7, .g6, .g4, .g3, .g2 { grid-template-columns: repeat(1, 1fr); }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -357,6 +360,80 @@ def parse_csv(f):
         except: pass
     return []
 
+# 정렬 iframe 안에 주입할 테이블 CSS (메인 페이지 스타일을 그대로 복제).
+# iframe 은 스타일이 격리되므로 표 디자인을 유지하려면 여기에 다시 넣어야 한다.
+_TABLE_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap');
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:#f8fafc;
+    font-family:'Plus Jakarta Sans','Noto Sans KR',sans-serif; }
+.custom-table-wrapper { background:white; border-radius:16px; border:1px solid #e2e8f0;
+    box-shadow:0 4px 6px -1px rgba(15,23,42,0.02); max-height:460px; overflow:auto; margin-bottom:16px; }
+.custom-table { width:100%; border-collapse:collapse; text-align:left; }
+.custom-table th { background:#f8fafc; color:#475569; font-weight:600; font-size:12px;
+    padding:12px 20px; border-bottom:1px solid #e2e8f0; text-transform:uppercase; letter-spacing:0.5px;
+    position:sticky; top:0; z-index:2; cursor:pointer; user-select:none; white-space:nowrap; }
+.custom-table th:hover { background:#eef2ff; color:#4f46e5; }
+.custom-table tr.total-row td { background:#f8fafc; font-weight:700; color:#0f172a;
+    border-top:2px solid #cbd5e1; border-bottom:none; position:sticky; bottom:0; }
+.custom-table td { padding:12px 20px; font-size:13px; color:#334155; border-bottom:1px solid #f1f5f9; }
+.custom-table tr:last-child td { border-bottom:none; }
+.custom-table tbody tr:hover td { background:#f8fafc; }
+.sort-ind { margin-left:4px; font-size:10px; color:#4f46e5; }
+"""
+
+# 헤더 클릭 시 해당 열을 오름차순↔내림차순 토글 정렬한다.
+# 숫자(원·%·개·건·# 등 기호 제거 후 파싱)는 수치 정렬, 그 외는 한글 가나다 정렬.
+# 합계행(total-row)은 정렬에서 제외하고 항상 맨 아래에 고정한다.
+_SORT_JS = """
+<script>
+document.querySelectorAll('table.custom-table').forEach(function(table){
+  var headers = table.querySelectorAll('thead th');
+  headers.forEach(function(th, idx){
+    th.addEventListener('click', function(){
+      var tbody = table.querySelector('tbody');
+      var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+      var totals = rows.filter(function(r){ return r.classList.contains('total-row'); });
+      var data   = rows.filter(function(r){ return !r.classList.contains('total-row'); });
+      var asc = th.getAttribute('data-asc') !== 'true';
+      headers.forEach(function(h){
+        if (h !== th){ h.removeAttribute('data-asc');
+          var s=h.querySelector('.sort-ind'); if(s) s.textContent=''; }
+      });
+      th.setAttribute('data-asc', asc ? 'true' : 'false');
+      function txt(r){ var c=r.children[idx]; return c ? c.textContent.trim() : ''; }
+      function num(v){
+        var c=v.replace(/[^0-9.\\-]/g,'');
+        if(c===''||c==='-'||c==='.') return null;
+        var n=parseFloat(c); return isNaN(n)?null:n;
+      }
+      data.sort(function(a,b){
+        var va=txt(a), vb=txt(b), na=num(va), nb=num(vb), cmp;
+        if(na!==null && nb!==null) cmp = na-nb;
+        else if(na!==null) cmp = 1;
+        else if(nb!==null) cmp = -1;
+        else cmp = va.localeCompare(vb,'ko');
+        return asc ? cmp : -cmp;
+      });
+      data.forEach(function(r){ tbody.appendChild(r); });
+      totals.forEach(function(r){ tbody.appendChild(r); });
+      var ind = th.querySelector('.sort-ind');
+      if(!ind){ ind=document.createElement('span'); ind.className='sort-ind'; th.appendChild(ind); }
+      ind.textContent = asc ? '▲' : '▼';
+    });
+  });
+});
+</script>
+"""
+
+def render_sortable_table(table_html):
+    # 표 높이를 행 수에 맞춰 추정(헤더+데이터+합계행). 길면 460px wrapper 내부 스크롤.
+    n_tr = table_html.count("<tr")
+    height = min(n_tr * 43 + 72, 496)
+    doc = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{_TABLE_CSS}</style></head>" \
+          f"<body>{table_html}{_SORT_JS}</body></html>"
+    components.html(doc, height=height, scrolling=False)
+
 def render_html(html):
     # st.markdown 은 본문에 textwrap.dedent().strip() 을 적용한다.
     # 동적으로 끼워 넣은 행(rows)들은 사이에 공백만 있는 빈 줄을 만들고,
@@ -365,7 +442,13 @@ def render_html(html):
     # 모든 줄의 들여쓰기를 제거하고 빈 줄을 없애 하나의 연속된
     # HTML 블록으로 만들어 항상 정상 렌더링되도록 한다.
     clean = "\n".join(ln.strip() for ln in html.splitlines() if ln.strip())
-    st.markdown(clean, unsafe_allow_html=True)
+    # 정렬 가능한 표(custom-table)는 JS 가 동작하도록 격리된 iframe(components.html)에
+    # 렌더링한다. st.markdown 은 보안상 <script> 를 제거하기 때문이다.
+    # 표가 아닌 일반 HTML(빈 상태 메시지·흐름 카드 등)은 기존대로 마크다운으로 그린다.
+    if 'class="custom-table"' in clean:
+        render_sortable_table(clean)
+    else:
+        st.markdown(clean, unsafe_allow_html=True)
 
 def html_table(data_dict, extra_col=None, cat_map=None):
     sorted_items = sorted(data_dict.items(), key=lambda x: -x[1]["revenue"])
@@ -443,6 +526,218 @@ def html_table(data_dict, extra_col=None, cat_map=None):
     </div>
     """
     render_html(table_content)
+
+
+# ── 종합일보 (Overview) ───────────────────────────────────────
+def _flow_row(label, value, indent=False, op="", val_color="", note="",
+              strong=False, big=False, border="1px solid #f1f5f9"):
+    pl = "padding-left:16px;" if indent else ""
+    fw = "800" if big else ("700" if strong else "600")
+    fs = "16px" if big else ("15px" if strong else "14px")
+    lbl_color = val_color or "#475569"
+    op_html = f'<span style="color:{lbl_color}">{op} </span>' if op else ""
+    note_html = f' &nbsp;<small style="font-size:11px;color:#94a3b8;font-weight:normal;">{note}</small>' if note else ""
+    vc = val_color or "#0f172a"
+    return (
+        f'<div style="display:flex;justify-content:space-between;border-bottom:{border};'
+        f'padding-bottom:9px;margin-bottom:9px;font-size:{fs};">'
+        f'<span style="color:{lbl_color};{pl}">{op_html}{label}</span>'
+        f'<span style="font-weight:{fw};color:{vc};">{value}{note_html}</span>'
+        f'</div>'
+    )
+
+def render_overview(refund, ds, total_rev, total_cost, total_m, total_rate,
+                    total_pg, total_op, total_op_r):
+    coup  = ds.get("coupon", 0.0)
+    grade = ds.get("grade", 0.0)
+    pdisc = ds.get("prod_disc", 0.0)
+    pts   = ds.get("points", 0.0)
+    dep   = ds.get("deposit", 0.0)
+    nvr   = ds.get("naver_pt", 0.0)
+    qty   = ds.get("qty", 0.0)
+    tot_disc = coup + grade + pdisc
+
+    gross    = refund["amount_all"]      # 환불 전 총 주문금액
+    ref_amt  = refund["amount_ref"]      # 환불 금액
+    net_pur  = ds.get("purchase", 0.0)   # 환불 후 총 주문금액 (= gross − ref_amt)
+    rate_amt = refund["rate_amt"]
+    rate_cnt = refund["rate_cnt"]
+    cost_pct = (total_cost / total_rev * 100) if total_rev else 0
+    disc_pct = (tot_disc / net_pur * 100) if net_pur else 0
+
+    # ── 핵심 지표 카드 ───────────────────────────────────────
+    section_title("핵심 지표 요약")
+    st.markdown(f"""
+    <div class="kpi-grid g4">
+        {kpi_card("환불 전 총 주문금액", fmt_won(gross), "취소·반품 포함 결제 기준")}
+        {kpi_card("환불 금액", fmt_won(ref_amt), f"환불 {refund['refund_cnt']:,}건", "accent-red")}
+        {kpi_card("환불율 (금액)", fmt_rate(rate_amt), f"건수 기준 {rate_cnt:.1f}%", "accent-rose")}
+        {kpi_card("환불 후 총 주문금액", fmt_won(net_pur), "할인 차감 전 매출")}
+    </div>
+    <div class="kpi-grid g4">
+        {kpi_card("총 할인 지원액", fmt_won(tot_disc), f"주문금액 대비 {disc_pct:.1f}%", "accent-amber")}
+        {kpi_card("순매출", fmt_won(total_rev), "할인 차감 + 네이버포인트")}
+        {kpi_card("총 공급원가", fmt_won(total_cost), f"매출 대비 {cost_pct:.1f}%", "accent-amber")}
+        {kpi_card("총 마진", fmt_won(total_m), f"마진율 {total_rate:.1f}%", rate_accent(total_rate))}
+    </div>
+    <div class="kpi-grid g4">
+        {kpi_card("PG 결제 수수료", fmt_won(total_pg), "결제 대행 공제", "accent-rose")}
+        {kpi_card("최종 영업 이익", fmt_won(total_op), f"영업이익률 {total_op_r:.1f}%", rate_accent(total_op_r))}
+        {kpi_card("총 판매 수량", f"{int(qty):,}개", "환불·반품 제외")}
+        {kpi_card("반품 진행중", f"{refund['pending_cnt']:,}건", f"{fmt_won(refund['amount_pend'])}", "accent-amber")}
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 매출 → 영업이익 흐름 (워터폴) ─────────────────────────
+    section_title("총매출 → 영업이익 종합 흐름")
+    flow = (
+        _flow_row("환불 전 총 주문금액 (A)", fmt_won(gross), strong=True)
+        + _flow_row("환불 금액 (B)", fmt_won(ref_amt), indent=True, op="−",
+                    val_color="#ef4444", note=f"환불율 {rate_amt:.1f}% · {refund['refund_cnt']:,}건/{refund['total_cnt']:,}건")
+        + _flow_row("환불 후 총 주문금액 (C = A − B)", fmt_won(net_pur), strong=True,
+                    border="2px solid #cbd5e1")
+        + _flow_row("총 할인 (쿠폰·등급·상품) (D)", fmt_won(tot_disc), indent=True, op="−",
+                    val_color="#f59e0b", note=f"주문금액 대비 {disc_pct:.1f}%")
+        + _flow_row("네이버페이 포인트 (E)", fmt_won(nvr), indent=True, op="+",
+                    val_color="#10b981", note="매출 가산")
+        + _flow_row("순매출 (F = C − D + E)", fmt_won(total_rev), strong=True,
+                    val_color="#4f46e5", border="2px solid #cbd5e1")
+        + _flow_row("공급원가 (G)", fmt_won(total_cost), indent=True, op="−",
+                    val_color="#ef4444", note=f"원가율 {cost_pct:.1f}%")
+        + _flow_row("순 마진 (H = F − G)", fmt_won(total_m), strong=True,
+                    val_color=("#10b981" if total_m >= 0 else "#ef4444"),
+                    note=f"마진율 {total_rate:.1f}%", border="2px solid #cbd5e1")
+        + _flow_row("PG 결제수수료 (I)", fmt_won(total_pg), indent=True, op="−",
+                    val_color="#ef4444")
+        + _flow_row("최종 영업 이익 (J = H − I)", fmt_won(total_op), big=True,
+                    val_color=("#10b981" if total_op_r >= 20 else "#ef4444"),
+                    note=f"영업이익률 {total_op_r:.1f}%", border="none")
+    )
+    render_html(
+        '<div style="background:white;border-radius:16px;border:1px solid #e2e8f0;'
+        'padding:24px 32px;box-shadow:0 4px 6px -1px rgba(15,23,42,0.02);margin-bottom:20px;">'
+        + flow + '</div>'
+    )
+
+    # ── 할인·결제수단 사용 상세 ──────────────────────────────
+    section_title("할인 · 적립 수단 상세")
+    st.markdown(f"""
+    <div class="kpi-grid g4">
+        {kpi_card("쿠폰 할인", fmt_won(coup))}
+        {kpi_card("회원등급 할인", fmt_won(grade))}
+        {kpi_card("상품 즉시 할인", fmt_won(pdisc))}
+        {kpi_card("네이버페이 포인트", fmt_won(nvr), "순매출 가산", "accent-green")}
+    </div>
+    <div class="kpi-grid g2">
+        {kpi_card("결제 적립금 사용액", fmt_won(pts), "매출 분석 제외")}
+        {kpi_card("예치금 사용액", fmt_won(dep), "매출 분석 제외")}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ── 환불 분석 ─────────────────────────────────────────────────
+def _refund_table(stats_dict, label_col, min_filter=False, with_qty=False):
+    def ref_rate(d):
+        return (d["refund"] / d["total"] * 100) if d["total"] else 0.0
+    def amt_rate(d):
+        return (d["amount_ref"] / d["amount_all"] * 100) if d["amount_all"] else 0.0
+    def fmt_set(s):
+        vals = sorted(s)
+        return vals[0] if len(vals) == 1 else ("복수" if len(vals) > 1 else "-")
+
+    items = stats_dict.items()
+    if min_filter:
+        items = [(k, d) for k, d in items if k and (d["refund"] >= 1 or d["pending"] >= 1)]
+    else:
+        items = [(k, d) for k, d in items if k]
+    rows_data = sorted(items, key=lambda kv: (-ref_rate(kv[1]), -kv[1]["refund"]))
+
+    if not rows_data:
+        render_html("<div style='color:#94a3b8;font-size:13px;padding:24px;text-align:center;background:white;border-radius:16px;border:1px solid #e2e8f0;margin-bottom:20px;'>표시할 환불 내역이 없습니다.</div>")
+        return
+
+    rows = []
+    for name, d in rows_data:
+        rr = ref_rate(d)
+        rc = "#ef4444" if rr >= 20 else "#f59e0b" if rr >= 10 else "#64748b"
+        pend = (f'<td style="text-align:right;color:#ea580c;font-weight:600;">{d["pending"]}</td>'
+                f'<td style="text-align:right;color:#ea580c;">{fmt_won(d["amount_pend"])}</td>'
+                if d["pending"] else
+                '<td style="text-align:right;color:#cbd5e1;">-</td><td style="text-align:right;color:#cbd5e1;">-</td>')
+        meta = ""
+        qty_cell = ""
+        if with_qty:
+            meta = (f'<td style="color:#64748b;white-space:nowrap;">{fmt_set(d["brands"])}</td>'
+                    f'<td style="color:#64748b;white-space:nowrap;">{fmt_set(d["cats"])}</td>')
+            qty_cell = f'<td style="text-align:right;color:#64748b;">{int(d["qty"]):,}개</td>'
+        rows.append(f"""
+        <tr>
+            <td style="font-weight:600;color:#1e293b;">{name}</td>
+            {meta}
+            {qty_cell}
+            <td style="text-align:right;color:#64748b;">{d['total']:,}건</td>
+            <td style="text-align:right;font-weight:600;">{d['refund']:,}건</td>
+            <td style="text-align:right;font-weight:700;color:{rc};">{rr:.1f}%</td>
+            <td style="text-align:right;font-weight:600;color:#ef4444;">{fmt_won(d['amount_ref'])}</td>
+            <td style="text-align:right;color:#64748b;">{amt_rate(d):.1f}%</td>
+            {pend}
+        </tr>
+        """)
+
+    meta_h = '<th>브랜드</th><th>카테고리</th>' if with_qty else ""
+    qty_h = '<th style="text-align:right;">판매수량</th>' if with_qty else ""
+    render_html(f"""
+    <div class="custom-table-wrapper">
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>{label_col}</th>
+                    {meta_h}
+                    {qty_h}
+                    <th style="text-align:right;">전체주문</th>
+                    <th style="text-align:right;">환불건수</th>
+                    <th style="text-align:right;">환불율</th>
+                    <th style="text-align:right;">환불금액</th>
+                    <th style="text-align:right;">금액비율</th>
+                    <th style="text-align:right;">반품진행중</th>
+                    <th style="text-align:right;">진행중금액</th>
+                </tr>
+            </thead>
+            <tbody>{"".join(rows)}</tbody>
+        </table>
+    </div>
+    """)
+
+def render_refunds(refund):
+    rate_cnt = refund["rate_cnt"]
+    rate_amt = refund["rate_amt"]
+
+    section_title("환불 현황 요약")
+    if refund["refund_cnt"] == 0 and refund["pending_cnt"] == 0:
+        premium_banner("ok", "환불 및 반품진행중 내역이 없습니다.")
+        return
+
+    acc = "accent-red" if rate_cnt >= 20 else "accent-amber" if rate_cnt >= 10 else "accent-green"
+    st.markdown(f"""
+    <div class="kpi-grid g4">
+        {kpi_card("환불율 (건수 기준)", fmt_rate(rate_cnt), f"{refund['refund_cnt']:,}건 / 전체 {refund['total_cnt']:,}건", acc)}
+        {kpi_card("환불율 (금액 기준)", fmt_rate(rate_amt), "환불액 / 전체 주문액", acc)}
+        {kpi_card("총 환불 금액", fmt_won(refund["amount_ref"]), f"환불 전 주문 {fmt_won(refund['amount_all'])}", "accent-red")}
+        {kpi_card("반품 진행중", f"{refund['pending_cnt']:,}건", f"{fmt_won(refund['amount_pend'])} (수거전)", "accent-amber")}
+    </div>
+    """, unsafe_allow_html=True)
+    if rate_cnt >= 20:
+        premium_banner("err", f"환불율이 {rate_cnt:.1f}%로 높습니다. 브랜드·상품별 원인 점검이 필요합니다.")
+
+    section_title("① 브랜드별 환불율")
+    _refund_table(refund["brand_stats"], "브랜드")
+
+    section_title("② 카테고리별 환불율")
+    _refund_table(refund["cat_stats"], "카테고리")
+
+    prod_n = sum(1 for _, d in refund["prod_stats"].items() if d["refund"] >= 1 or d["pending"] >= 1)
+    section_title(f"③ 상품별 환불율 (환불·반품진행중 1건 이상 · {prod_n}개 상품)")
+    _refund_table(refund["prod_stats"], "상품명", min_filter=True, with_qty=True)
 
 
 # ── 로그인 화면 ───────────────────────────────────────────────
@@ -552,6 +847,9 @@ def main():
     total_op_r = (total_op / total_rev * 100) if total_rev else 0
     ds = data.get("ds", {})
 
+    # 환불 통계 (취소/반품완료 = _skip, 반품진행중 별도) — 종합일보·환불 탭 공용
+    refund = compute_refund_stats(enriched)
+
     st.markdown(f"""
     <div class="dashboard-header">
         <div class="header-title">
@@ -583,10 +881,12 @@ def main():
             use_container_width=True,
         )
 
-    # ── 핵심 KPI 대형 카드 그리드 (6열) ─────────────────────────
+    # ── 핵심 KPI 대형 카드 그리드 (7열) ─────────────────────────
+    cost_pct = (total_cost / total_rev * 100) if total_rev else 0
     st.markdown(f"""
-    <div class="kpi-grid g6">
+    <div class="kpi-grid g7">
         {kpi_card("총 순매출", fmt_won(total_rev), "재고소진 매출 합산")}
+        {kpi_card("총 공급원가", fmt_won(total_cost), f"매출 대비 {cost_pct:.1f}%", "accent-amber")}
         {kpi_card("총 마진", fmt_won(total_m), f"평균 마진율 {total_rate:.1f}%", rate_accent(total_rate))}
         {kpi_card("종합 마진율", fmt_rate(total_rate), "전체 데이터 기준", rate_accent(total_rate))}
         {kpi_card("PG 결제 수수료", fmt_won(total_pg), f"매출 대비 {(total_pg/total_rev*100) if total_rev else 0:.2f}%", "accent-rose")}
@@ -596,7 +896,22 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── 대시보드 탭 레이아웃 ──────────────────────────────────────
-    t1, t2, t3, t4, t5 = st.tabs(["📊 상세 마진 분석", "🔍 판매가 이상 감지", "🏷️ 할인율 입체 분석", "💳 PG 수수료 명세", "📦 아울렛 & 재고소진"])
+    t0, t6, t1, t2, t3, t4, t5 = st.tabs([
+        "📋 종합일보", "🔄 환불 분석",
+        "📊 상세 마진 분석", "🔍 판매가 이상 감지", "🏷️ 할인율 입체 분석",
+        "💳 PG 수수료 명세", "📦 아울렛 & 재고소진",
+    ])
+
+    # ── 탭 0: 종합일보 ────────────────────────────────────────
+    with t0:
+        render_overview(
+            refund, ds, total_rev, total_cost, total_m, total_rate,
+            total_pg, total_op, total_op_r,
+        )
+
+    # ── 탭 6: 환불 분석 ───────────────────────────────────────
+    with t6:
+        render_refunds(refund)
 
     # ── 탭 1: 상세 마진 분석 ──────────────────────────────────
     with t1:
