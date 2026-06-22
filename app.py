@@ -5,6 +5,7 @@
 import io, csv, sys, os
 import streamlit as st
 import streamlit.components.v1 as components
+import pandas as pd
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -13,7 +14,10 @@ from dedra_daily_report import (
     detect_price_anomalies, detect_discount_anomalies,
     generate_html, margin, margin_rate, fmt_won, fmt_rate,
 )
-from dedra_daily_report import recovery_rate, compute_refund_stats
+from dedra_daily_report import (
+    recovery_rate, compute_refund_stats,
+    safe_float, parse_brand, PENDING_STATUS,
+)
 
 # ── 페이지 설정 ───────────────────────────────────────────────
 st.set_page_config(
@@ -546,7 +550,57 @@ def _flow_row(label, value, indent=False, op="", val_color="", note="",
         f'</div>'
     )
 
-def render_overview(refund, ds, total_rev, total_cost, total_m, total_rate,
+# 종합일보 핵심지표 → 카테고리 1차 분해 → 주문번호 2차 드릴다운용 정의.
+# 각 지표는 (행 필터, 값 추출, 값 라벨)로 정의되며 enriched_rows 를 직접 집계한다.
+_METRICS = {
+    "gross":   (lambda r: True,                    lambda r: safe_float(r.get("상품구매금액")), "주문금액(원)"),
+    "refund":  (lambda r: bool(r.get("_skip")),    lambda r: safe_float(r.get("상품구매금액")), "환불금액(원)"),
+    "netpur":  (lambda r: not r.get("_skip"),      lambda r: safe_float(r.get("상품구매금액")), "주문금액(원)"),
+    "rev":     (lambda r: not r.get("_skip"),      lambda r: r.get("_net_revenue", 0.0),         "순매출(원)"),
+    "cost":    (lambda r: not r.get("_skip"),      lambda r: r.get("_cost", 0.0),                "공급원가(원)"),
+    "margin":  (lambda r: not r.get("_skip"),      lambda r: r.get("_net_revenue", 0.0) - r.get("_cost", 0.0), "마진(원)"),
+    "qty":     (lambda r: not r.get("_skip"),      lambda r: safe_float(r.get("수량")),          "수량"),
+    "pending": (lambda r: r.get("주문 상태", "").strip() == PENDING_STATUS,
+                lambda r: safe_float(r.get("상품구매금액")), "진행중금액(원)"),
+}
+
+def _group_by_cat(enriched, row_filter, value_fn):
+    # 필터에 걸린 행을 메인카테고리별로 (값 합계, 건수) 집계.
+    agg = {}
+    for r in enriched:
+        if not row_filter(r):
+            continue
+        cat = r.get("메인카테고리 이름", "").strip() or "(미분류)"
+        a = agg.setdefault(cat, [0.0, 0])
+        a[0] += value_fn(r)
+        a[1] += 1
+    return agg
+
+def _orders_std(enriched, row_filter, cat=None):
+    # 필터에 걸린 주문 행을 주문번호 단위로 펼친다.
+    # cat 이 주어지면 해당 카테고리만, None 이면 전체를 펼친다(카테고리 열 포함).
+    out = []
+    for r in enriched:
+        if not row_filter(r):
+            continue
+        c = r.get("메인카테고리 이름", "").strip() or "(미분류)"
+        if cat is not None and c != cat:
+            continue
+        out.append({
+            "주문번호": r.get("주문번호", "").strip(),
+            "상품명": r.get("상품명(데드라)", "").strip(),
+            "브랜드": parse_brand(r.get("브랜드")),
+            "카테고리": c,
+            "수량": int(safe_float(r.get("수량")) or 0),
+            "상품구매금액(원)": round(safe_float(r.get("상품구매금액"))),
+            "공급원가(원)": round(r.get("_cost", 0.0)),
+            "순매출(원)": round(r.get("_net_revenue", 0.0)),
+            "상태": r.get("주문 상태", "").strip(),
+        })
+    return out
+
+
+def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_rate,
                     total_pg, total_op, total_op_r):
     coup  = ds.get("coupon", 0.0)
     grade = ds.get("grade", 0.0)
@@ -565,28 +619,194 @@ def render_overview(refund, ds, total_rev, total_cost, total_m, total_rate,
     cost_pct = (total_cost / total_rev * 100) if total_rev else 0
     disc_pct = (tot_disc / net_pur * 100) if net_pur else 0
 
-    # ── 핵심 지표 카드 ───────────────────────────────────────
+    # 지표별 상세 설명(산출 방식) — 클릭 시 팝업 상단에 표시.
+    explains = {
+        "gross": "업로드된 <b>모든 주문 행(취소·반품 포함)</b>의 <code>상품구매금액</code>을 합산한 값입니다. 할인 적용 전, 고객이 주문한 정가 기준 결제 금액이며 <b>환불 전 총 주문금액 = 환불 후 주문금액 + 환불 금액</b> 입니다.",
+        "refund": "주문 상태가 <b>취소 요청 / 교환 신청 / 반품 요청 / 반품 완료-환불완료</b> 인 행의 <code>상품구매금액</code> 합계입니다. (‘반품 처리중-수거전’은 환불 확정 전이라 별도 ‘반품 진행중’으로 집계)",
+        "rate": "<b>환불율(금액) = 환불 금액 ÷ 환불 전 총 주문금액 × 100</b><br><b>환불율(건수) = 환불 건수 ÷ 전체 주문 건수 × 100</b>",
+        "netpur": "환불 전 총 주문금액에서 환불 금액을 뺀, 실제 유효 주문(정상 + 반품진행중)의 <code>상품구매금액</code> 합계입니다. <b>환불 후 주문금액 = 환불 전 − 환불</b>",
+        "disc": "<b>쿠폰 + 회원등급 추가할인 + 상품별 추가할인</b>의 합계입니다. 적립금·예치금은 결제수단이라 할인에서 제외합니다. 주문서 쿠폰·등급 할인은 주문 내 품목에 상품구매금액 비율로 배분해 합산합니다.",
+        "rev": "<b>순매출 = 환불 후 주문금액 − 총 할인 + 네이버페이 포인트</b>. 네이버페이 포인트는 데드라가 정산받는 금액이라 매출에 가산합니다.",
+        "cost": "각 주문 품목의 <b>공급원가(단가) × 수량</b> 합계입니다. (취소·반품 제외)",
+        "margin": "<b>마진 = 순매출 − 공급원가</b>, <b>마진율 = 마진 ÷ 순매출 × 100</b>",
+        "pg": "결제수단별 <b>순매출 × PG 수수료율</b>의 합계입니다. 수수료율은 결제업체·결제수단 조합에 따라 적용됩니다.",
+        "op": "<b>영업이익 = 마진 − PG 수수료</b>. 상품 판매로 실제 남는 이익입니다.",
+        "qty": "취소·반품을 제외한 정상 판매 품목의 <code>수량</code> 합계입니다.",
+        "pending": "주문 상태가 <b>반품 처리중 - 수거전</b> 인 행입니다. 아직 환불이 확정되지 않은 단계라 환불 금액과 분리해 집계합니다.",
+    }
+
+    def _drilldown(df1, sel_col, key, build_level2, l2_title):
+        # 1차 분해표(df1)를 행 선택 가능한 dataframe 으로 그리고,
+        # 행을 클릭하면 build_level2(선택값)로 2차(주문번호) 상세를 펼친다.
+        if df1.empty:
+            st.info("표시할 내역이 없습니다.")
+            return
+        ev = st.dataframe(
+            df1, hide_index=True, use_container_width=True,
+            on_select="rerun", selection_mode="single-row", key=f"l1_{key}",
+        )
+        if ev.selection.rows:
+            sel = df1.iloc[ev.selection.rows[0]][sel_col]
+            rows2 = build_level2(sel)
+            st.markdown(f"##### ‘{sel}’ {l2_title} · {len(rows2):,}건")
+            if rows2:
+                st.dataframe(pd.DataFrame(rows2), hide_index=True, use_container_width=True)
+            else:
+                st.info("해당 항목의 주문 내역이 없습니다.")
+        else:
+            st.caption("⬆️ 위 표에서 항목(행)을 클릭하면 주문번호별 상세가 펼쳐집니다.")
+
+    @st.dialog("핵심 지표 상세 내역", width="large")
+    def _detail(key, title):
+        st.markdown(f"#### {title}")
+        st.markdown(
+            f'<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;'
+            f'padding:14px 18px;font-size:13px;line-height:1.75;color:#3730a3;margin-bottom:14px;">'
+            f'<b>📌 산출 방식</b><br>{explains.get(key, "")}</div>',
+            unsafe_allow_html=True,
+        )
+        # 영업이익: 총계 산식 흐름만 표시 (드릴다운/보기전환 없음)
+        if key == "op":
+            render_html(
+                '<div style="background:white;border-radius:16px;border:1px solid #e2e8f0;padding:20px 28px;">'
+                + _flow_row("순매출 (A)", fmt_won(total_rev), strong=True, val_color="#4f46e5")
+                + _flow_row("공급원가 (B)", fmt_won(total_cost), indent=True, op="−", val_color="#ef4444")
+                + _flow_row("마진 (C = A − B)", fmt_won(total_m), strong=True, note=f"마진율 {total_rate:.1f}%", border="2px solid #cbd5e1")
+                + _flow_row("PG 수수료 (D)", fmt_won(total_pg), indent=True, op="−", val_color="#ef4444")
+                + _flow_row("영업이익 (E = C − D)", fmt_won(total_op), big=True,
+                            val_color=("#10b981" if total_op_r >= 20 else "#ef4444"),
+                            note=f"영업이익률 {total_op_r:.1f}%", border="none")
+                + '</div>'
+            )
+            return
+
+        # 보기 전환: 분류별 드릴다운 ↔ 전체 주문 한눈에
+        view = st.radio(
+            "보기 방식", ["📂 분류별 보기", "📋 전체 한눈에"],
+            horizontal=True, key=f"view_{key}", label_visibility="collapsed",
+        )
+        total_mode = (view == "📋 전체 한눈에")
+        st.caption("표 헤더 클릭 → 오름/내림 정렬 · ‘분류별 보기’에선 항목(행) 클릭 → 주문번호별 상세")
+
+        # 총 할인: 할인 유형(쿠폰/등급/상품)별 → 주문번호 드릴다운
+        if key == "disc":
+            comps = [("쿠폰 할인", "_alloc_coupon"), ("회원등급 할인", "_alloc_grade"),
+                     ("상품 즉시 할인", "_disc_product")]
+            fld_of = dict(comps)
+            if total_mode:
+                rows = [{
+                    "주문번호": r.get("주문번호", "").strip(),
+                    "상품명": r.get("상품명(데드라)", "").strip(),
+                    "브랜드": parse_brand(r.get("브랜드")),
+                    "카테고리": r.get("메인카테고리 이름", "").strip() or "(미분류)",
+                    "쿠폰할인(원)": round(r.get("_alloc_coupon", 0.0)),
+                    "등급할인(원)": round(r.get("_alloc_grade", 0.0)),
+                    "상품할인(원)": round(r.get("_disc_product", 0.0)),
+                    "상품구매금액(원)": round(safe_float(r.get("상품구매금액"))),
+                    "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
+                    "상태": r.get("주문 상태", "").strip(),
+                } for r in enriched if not r.get("_skip")
+                  and (r.get("_alloc_coupon", 0.0) + r.get("_alloc_grade", 0.0) + r.get("_disc_product", 0.0)) > 0]
+                st.markdown(f"##### 할인 적용 주문 전체 · {len(rows):,}건")
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                return
+            df1 = pd.DataFrame([
+                {"할인 유형": label,
+                 "할인금액(원)": round(sum(r.get(fld, 0.0) for r in enriched if not r.get("_skip"))),
+                 "적용건수": sum(1 for r in enriched if not r.get("_skip") and r.get(fld, 0.0) > 0)}
+                for label, fld in comps
+            ])
+            def _l2(sel):
+                fld = fld_of[sel]
+                return [{
+                    "주문번호": r.get("주문번호", "").strip(),
+                    "상품명": r.get("상품명(데드라)", "").strip(),
+                    "브랜드": parse_brand(r.get("브랜드")),
+                    "할인액(원)": round(r.get(fld, 0.0)),
+                    "상품구매금액(원)": round(safe_float(r.get("상품구매금액"))),
+                    "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
+                    "상태": r.get("주문 상태", "").strip(),
+                } for r in enriched if not r.get("_skip") and r.get(fld, 0.0) > 0]
+            _drilldown(df1, "할인 유형", key, _l2, "적용 주문")
+            return
+
+        # PG 수수료: 결제수단별 → 주문번호 드릴다운
+        if key == "pg":
+            def _pg_row(r):
+                return {
+                    "주문번호": r.get("주문번호", "").strip(),
+                    "결제수단": r.get("_pg_name", "") or "기타",
+                    "카테고리": r.get("메인카테고리 이름", "").strip() or "(미분류)",
+                    "순매출(원)": round(r.get("_net_revenue", 0.0)),
+                    "수수료(원)": round(r.get("_pg_fee", 0.0)),
+                    "상태": r.get("주문 상태", "").strip(),
+                }
+            if total_mode:
+                rows = [_pg_row(r) for r in enriched if not r.get("_skip")]
+                st.markdown(f"##### 결제 주문 전체 · {len(rows):,}건")
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                return
+            agg = {}
+            for r in enriched:
+                if r.get("_skip"):
+                    continue
+                nm = r.get("_pg_name", "") or "기타"
+                a = agg.setdefault(nm, [0.0, 0.0, 0])
+                a[0] += r.get("_net_revenue", 0.0); a[1] += r.get("_pg_fee", 0.0); a[2] += 1
+            df1 = pd.DataFrame([
+                {"결제수단": k, "순매출(원)": round(v[0]), "수수료(원)": round(v[1]), "건수": v[2]}
+                for k, v in agg.items()
+            ]).sort_values("수수료(원)", ascending=False).reset_index(drop=True)
+            _drilldown(df1, "결제수단", key,
+                       lambda sel: [_pg_row(r) for r in enriched
+                                    if not r.get("_skip") and (r.get("_pg_name", "") or "기타") == sel],
+                       "결제 주문")
+            return
+
+        # 카테고리형 지표 (gross/refund/rate/netpur/rev/cost/margin/qty/pending)
+        mk = "refund" if key == "rate" else key
+        row_filter, value_fn, vlabel = _METRICS[mk]
+        if total_mode:
+            rows = _orders_std(enriched, row_filter, None)
+            st.markdown(f"##### 전체 주문 상세 · {len(rows):,}건")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            return
+        agg = _group_by_cat(enriched, row_filter, value_fn)
+        if vlabel == "수량":
+            df1 = pd.DataFrame([{"카테고리": c, "수량": int(v), "건수": n} for c, (v, n) in agg.items()])
+            sort_col = "수량"
+        else:
+            df1 = pd.DataFrame([{"카테고리": c, vlabel: round(v), "건수": n} for c, (v, n) in agg.items()])
+            sort_col = vlabel
+        if not df1.empty:
+            df1 = df1.sort_values(sort_col, ascending=False).reset_index(drop=True)
+        _drilldown(df1, "카테고리", key, lambda sel: _orders_std(enriched, row_filter, sel), "주문번호별 상세")
+
+    # ── 핵심 지표 카드 (클릭 시 상세 팝업) ───────────────────
     section_title("핵심 지표 요약")
-    st.markdown(f"""
-    <div class="kpi-grid g4">
-        {kpi_card("환불 전 총 주문금액", fmt_won(gross), "취소·반품 포함 결제 기준")}
-        {kpi_card("환불 금액", fmt_won(ref_amt), f"환불 {refund['refund_cnt']:,}건", "accent-red")}
-        {kpi_card("환불율 (금액)", fmt_rate(rate_amt), f"건수 기준 {rate_cnt:.1f}%", "accent-rose")}
-        {kpi_card("환불 후 총 주문금액", fmt_won(net_pur), "할인 차감 전 매출")}
-    </div>
-    <div class="kpi-grid g4">
-        {kpi_card("총 할인 지원액", fmt_won(tot_disc), f"주문금액 대비 {disc_pct:.1f}%", "accent-amber")}
-        {kpi_card("순매출", fmt_won(total_rev), "할인 차감 + 네이버포인트")}
-        {kpi_card("총 공급원가", fmt_won(total_cost), f"매출 대비 {cost_pct:.1f}%", "accent-amber")}
-        {kpi_card("총 마진", fmt_won(total_m), f"마진율 {total_rate:.1f}%", rate_accent(total_rate))}
-    </div>
-    <div class="kpi-grid g4">
-        {kpi_card("PG 결제 수수료", fmt_won(total_pg), "결제 대행 공제", "accent-rose")}
-        {kpi_card("최종 영업 이익", fmt_won(total_op), f"영업이익률 {total_op_r:.1f}%", rate_accent(total_op_r))}
-        {kpi_card("총 판매 수량", f"{int(qty):,}개", "환불·반품 제외")}
-        {kpi_card("반품 진행중", f"{refund['pending_cnt']:,}건", f"{fmt_won(refund['amount_pend'])}", "accent-amber")}
-    </div>
-    """, unsafe_allow_html=True)
+    st.caption("각 카드의 ‘📋 상세 내역’ 버튼을 누르면 산출 방식과 분해 내역(정렬 가능)이 팝업으로 표시됩니다.")
+    cards = [
+        ("gross",   "환불 전 총 주문금액", fmt_won(gross), "취소·반품 포함 결제 기준", ""),
+        ("refund",  "환불 금액", fmt_won(ref_amt), f"환불 {refund['refund_cnt']:,}건", "accent-red"),
+        ("rate",    "환불율 (금액)", fmt_rate(rate_amt), f"건수 기준 {rate_cnt:.1f}%", "accent-rose"),
+        ("netpur",  "환불 후 총 주문금액", fmt_won(net_pur), "할인 차감 전 매출", ""),
+        ("disc",    "총 할인 지원액", fmt_won(tot_disc), f"주문금액 대비 {disc_pct:.1f}%", "accent-amber"),
+        ("rev",     "순매출", fmt_won(total_rev), "할인 차감 + 네이버포인트", ""),
+        ("cost",    "총 공급원가", fmt_won(total_cost), f"매출 대비 {cost_pct:.1f}%", "accent-amber"),
+        ("margin",  "총 마진", fmt_won(total_m), f"마진율 {total_rate:.1f}%", rate_accent(total_rate)),
+        ("pg",      "PG 결제 수수료", fmt_won(total_pg), "결제 대행 공제", "accent-rose"),
+        ("op",      "최종 영업 이익", fmt_won(total_op), f"영업이익률 {total_op_r:.1f}%", rate_accent(total_op_r)),
+        ("qty",     "총 판매 수량", f"{int(qty):,}개", "환불·반품 제외", ""),
+        ("pending", "반품 진행중", f"{refund['pending_cnt']:,}건", fmt_won(refund['amount_pend']), "accent-amber"),
+    ]
+    for i in range(0, len(cards), 4):
+        cols = st.columns(4)
+        for col, (key, title, val, sub, accent) in zip(cols, cards[i:i+4]):
+            with col:
+                st.markdown(f'<div style="margin-bottom:8px;">{kpi_card(title, val, sub, accent)}</div>',
+                            unsafe_allow_html=True)
+                if st.button("📋 상세 내역", key=f"ov_detail_{key}", use_container_width=True):
+                    _detail(key, title)
 
     # ── 매출 → 영업이익 흐름 (워터폴) ─────────────────────────
     section_title("총매출 → 영업이익 종합 흐름")
@@ -905,7 +1125,7 @@ def main():
     # ── 탭 0: 종합일보 ────────────────────────────────────────
     with t0:
         render_overview(
-            refund, ds, total_rev, total_cost, total_m, total_rate,
+            enriched, refund, ds, total_rev, total_cost, total_m, total_rate,
             total_pg, total_op, total_op_r,
         )
 
