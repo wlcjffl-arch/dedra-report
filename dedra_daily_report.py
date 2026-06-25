@@ -168,10 +168,13 @@ def preprocess_rows(rows):
         alloc_naver_pt = fi.get("naver_pt", 0.0) * ratio
 
         disc_product   = safe_float(r.get("상품별 추가할인금액"))
-        # 순매출 = 구매금액 - (쿠폰+등급+상품추가할인) + 네이버포인트 (매출 처리)
-        # 적립금·예치금은 결제수단이므로 순매출에서 제외
+        # 순매출 = 구매금액 - (쿠폰+등급+상품추가할인)
+        # 적립금·예치금·네이버포인트는 모두 결제수단/적립이므로 순매출에서 제외한다.
+        #  - 선불금(네이버페이) 주문: 상품구매금액을 네이버포인트로 결제 → 이미 구매금액에 반영됨
+        #  - 카드 등 주문: 네이버포인트는 적립 리워드 → 매출이 아님
+        # 과거 +네이버포인트를 더해 네이버페이 매출이 이중계상되던 버그를 제거했다.
         total_discount   = disc_product + alloc_coupon + alloc_grade
-        net_revenue      = purchase - total_discount + alloc_naver_pt
+        net_revenue      = purchase - total_discount
         disc_for_anomaly = disc_product + alloc_coupon + alloc_grade
 
         pg_name, pg_rate = get_pg_info(fi.get("pg_co", ""), fi.get("pay", ""))
@@ -1765,7 +1768,7 @@ def generate_html(data, price_anomalies, outlet_items, discount_over, discount_b
       {dscard("총 주문금액",  f"{pur:,.0f}원",       cls="ds-c-neutral")}
       {dscard("총 할인금액",  f"{tot_disc:,.0f}원",  sub=f"쿠폰+등급+추가할인 | {disc_pct:.1f}% 할인",
               cls="ds-c-discount")}
-      {dscard("순매출",      f"{total_rev:,.0f}원",  sub="구매금액 − 쿠폰·등급·추가할인 + 네이버포인트",
+      {dscard("순매출",      f"{total_rev:,.0f}원",  sub="구매금액 − 쿠폰·등급·추가할인",
               cls="ds-c-rev")}
       {dscard("공급원가",    f"{total_cost:,.0f}원",  cls="ds-c-cost")}
       {dscard("마진",        f"{total_m:,.0f}원",    sub=f"마진율 {total_rate:.1f}%",
@@ -1790,7 +1793,7 @@ def generate_html(data, price_anomalies, outlet_items, discount_over, discount_b
       {dscard("상품별 추가할인", f"{pdisc:,.0f}원", sub=_pct(pdisc), cls="ds-c-discount")}
       {dscard("적립금 사용",           f"{pts:,.0f}원", sub="결제수단 — 순매출 미포함", cls="ds-c-neutral")}
       {dscard("예치금 사용",           f"{dep:,.0f}원", sub="결제수단 — 순매출 미포함", cls="ds-c-neutral")}
-      {dscard("네이버포인트 (매출 포함)", f"{nvr:,.0f}원", sub="순매출에 가산",             cls="ds-c-rev")}
+      {dscard("네이버포인트",            f"{nvr:,.0f}원", sub="결제수단/적립 — 순매출 미포함", cls="ds-c-neutral")}
     </div>
   </div>
 </div>"""

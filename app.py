@@ -626,7 +626,7 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
         "rate": "<b>환불율(금액) = 환불 금액 ÷ 환불 전 총 주문금액 × 100</b><br><b>환불율(건수) = 환불 건수 ÷ 전체 주문 건수 × 100</b>",
         "netpur": "환불 전 총 주문금액에서 환불 금액을 뺀, 실제 유효 주문(정상 + 반품진행중)의 <code>상품구매금액</code> 합계입니다. <b>환불 후 주문금액 = 환불 전 − 환불</b>",
         "disc": "<b>쿠폰 + 회원등급 추가할인 + 상품별 추가할인</b>의 합계입니다. 적립금·예치금은 결제수단이라 할인에서 제외합니다. 주문서 쿠폰·등급 할인은 주문 내 품목에 상품구매금액 비율로 배분해 합산합니다.",
-        "rev": "<b>순매출 = 환불 후 주문금액 − 총 할인 + 네이버페이 포인트</b>. 네이버페이 포인트는 데드라가 정산받는 금액이라 매출에 가산합니다.",
+        "rev": "<b>순매출 = 환불 후 주문금액 − 총 할인(쿠폰·등급·상품)</b>. 적립금·예치금·네이버페이 포인트는 결제수단/적립이라 매출에 포함하지 않습니다. (네이버페이 주문은 상품구매금액을 포인트로 결제한 것이라 이미 주문금액에 반영돼 있어 다시 더하지 않습니다.)",
         "cost": "각 주문 품목의 <b>공급원가(단가) × 수량</b> 합계입니다. (취소·반품 제외)",
         "margin": "<b>마진 = 순매출 − 공급원가</b>, <b>마진율 = 마진 ÷ 순매출 × 100</b>",
         "pg": "결제수단별 <b>순매출 × PG 수수료율</b>의 합계입니다. 수수료율은 결제업체·결제수단 조합에 따라 적용됩니다.",
@@ -791,7 +791,7 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
         ("rate",    "환불율 (금액)", fmt_rate(rate_amt), f"건수 기준 {rate_cnt:.1f}%", "accent-rose"),
         ("netpur",  "환불 후 총 주문금액", fmt_won(net_pur), "할인 차감 전 매출", ""),
         ("disc",    "총 할인 지원액", fmt_won(tot_disc), f"주문금액 대비 {disc_pct:.1f}%", "accent-amber"),
-        ("rev",     "순매출", fmt_won(total_rev), "할인 차감 + 네이버포인트", ""),
+        ("rev",     "순매출", fmt_won(total_rev), "구매금액 − 할인", ""),
         ("cost",    "총 공급원가", fmt_won(total_cost), f"매출 대비 {cost_pct:.1f}%", "accent-amber"),
         ("margin",  "총 마진", fmt_won(total_m), f"마진율 {total_rate:.1f}%", rate_accent(total_rate)),
         ("pg",      "PG 결제 수수료", fmt_won(total_pg), "결제 대행 공제", "accent-rose"),
@@ -818,18 +818,16 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
                     border="2px solid #cbd5e1")
         + _flow_row("총 할인 (쿠폰·등급·상품) (D)", fmt_won(tot_disc), indent=True, op="−",
                     val_color="#f59e0b", note=f"주문금액 대비 {disc_pct:.1f}%")
-        + _flow_row("네이버페이 포인트 (E)", fmt_won(nvr), indent=True, op="+",
-                    val_color="#10b981", note="매출 가산")
-        + _flow_row("순매출 (F = C − D + E)", fmt_won(total_rev), strong=True,
+        + _flow_row("순매출 (E = C − D)", fmt_won(total_rev), strong=True,
                     val_color="#4f46e5", border="2px solid #cbd5e1")
-        + _flow_row("공급원가 (G)", fmt_won(total_cost), indent=True, op="−",
+        + _flow_row("공급원가 (F)", fmt_won(total_cost), indent=True, op="−",
                     val_color="#ef4444", note=f"원가율 {cost_pct:.1f}%")
-        + _flow_row("순 마진 (H = F − G)", fmt_won(total_m), strong=True,
+        + _flow_row("순 마진 (G = E − F)", fmt_won(total_m), strong=True,
                     val_color=("#10b981" if total_m >= 0 else "#ef4444"),
                     note=f"마진율 {total_rate:.1f}%", border="2px solid #cbd5e1")
-        + _flow_row("PG 결제수수료 (I)", fmt_won(total_pg), indent=True, op="−",
+        + _flow_row("PG 결제수수료 (H)", fmt_won(total_pg), indent=True, op="−",
                     val_color="#ef4444")
-        + _flow_row("최종 영업 이익 (J = H − I)", fmt_won(total_op), big=True,
+        + _flow_row("최종 영업 이익 (I = G − H)", fmt_won(total_op), big=True,
                     val_color=("#10b981" if total_op_r >= 20 else "#ef4444"),
                     note=f"영업이익률 {total_op_r:.1f}%", border="none")
     )
@@ -842,15 +840,15 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
     # ── 할인·결제수단 사용 상세 ──────────────────────────────
     section_title("할인 · 적립 수단 상세")
     st.markdown(f"""
-    <div class="kpi-grid g4">
+    <div class="kpi-grid g3">
         {kpi_card("쿠폰 할인", fmt_won(coup))}
         {kpi_card("회원등급 할인", fmt_won(grade))}
         {kpi_card("상품 즉시 할인", fmt_won(pdisc))}
-        {kpi_card("네이버페이 포인트", fmt_won(nvr), "순매출 가산", "accent-green")}
     </div>
-    <div class="kpi-grid g2">
-        {kpi_card("결제 적립금 사용액", fmt_won(pts), "매출 분석 제외")}
-        {kpi_card("예치금 사용액", fmt_won(dep), "매출 분석 제외")}
+    <div class="kpi-grid g3">
+        {kpi_card("네이버페이 포인트", fmt_won(nvr), "결제수단/적립 · 매출 미포함")}
+        {kpi_card("결제 적립금 사용액", fmt_won(pts), "결제수단 · 매출 미포함")}
+        {kpi_card("예치금 사용액", fmt_won(dep), "결제수단 · 매출 미포함")}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1375,7 +1373,7 @@ def main():
             {kpi_card("총 주문액 (소비자가)", fmt_won(pur), "할인 전 원금")}
             {kpi_card("총 할인 지원액", fmt_won(tot_disc), f"평균 할인율 {disc_pct:.1f}%", "accent-amber")}
             {kpi_card("결제 적립금 사용액", fmt_won(pts), "매출 분석 제외")}
-            {kpi_card("네이버페이 포인트", fmt_won(nvr), "순매출에 정상 합산", "accent-green")}
+            {kpi_card("네이버페이 포인트", fmt_won(nvr), "결제수단/적립 · 매출 미포함")}
         </div>
         <div class="kpi-grid g3">
             {kpi_card("쿠폰 할인 상세", fmt_won(coup), f"원금 대비 {(coup/pur*100) if pur else 0:.1f}%")}
