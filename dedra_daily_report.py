@@ -126,7 +126,8 @@ def preprocess_rows(rows):
     사용한 뒤 상품구매금액 비율로 배분.
 
     순매출(메인) = 구매금액 - 상품별할인 - 쿠폰 - 등급할인 - 적립금 - 예치금
-    할인율 이상감지용  = 구매금액 - 상품별할인 - 쿠폰 - 등급할인  (적립금·예치금 제외)
+    총할인(=이상감지용) = 상품별할인 + 쿠폰 + 등급할인 + 적립금 + 예치금
+    (네이버포인트는 결제수단/적립이므로 계속 제외)
     """
     # 1차 패스: 주문별 총 구매금액 & 첫 행 정보 수집 (취소/교환 포함 전체)
     order_total = {}   # order_no → 총 상품구매금액
@@ -168,14 +169,16 @@ def preprocess_rows(rows):
         alloc_naver_pt = fi.get("naver_pt", 0.0) * ratio
 
         disc_product   = safe_float(r.get("상품별 추가할인금액"))
-        # 순매출 = 구매금액 - (쿠폰+등급+상품추가할인)
-        # 적립금·예치금·네이버포인트는 모두 결제수단/적립이므로 순매출에서 제외한다.
+        # 순매출 = 구매금액 - (쿠폰+등급+상품추가할인+적립금+예치금)
+        # 적립금·예치금은 실제로 받지 못한 금액이므로 할인으로 취급해 순매출에서 뺀다.
+        # 네이버포인트는 여전히 제외한다(결제수단/적립 리워드):
         #  - 선불금(네이버페이) 주문: 상품구매금액을 네이버포인트로 결제 → 이미 구매금액에 반영됨
         #  - 카드 등 주문: 네이버포인트는 적립 리워드 → 매출이 아님
         # 과거 +네이버포인트를 더해 네이버페이 매출이 이중계상되던 버그를 제거했다.
-        total_discount   = disc_product + alloc_coupon + alloc_grade
+        total_discount   = (disc_product + alloc_coupon + alloc_grade
+                            + alloc_points + alloc_deposit)
         net_revenue      = purchase - total_discount
-        disc_for_anomaly = disc_product + alloc_coupon + alloc_grade
+        disc_for_anomaly = total_discount
 
         pg_name, pg_rate = get_pg_info(fi.get("pg_co", ""), fi.get("pay", ""))
         pg_fee = max(0.0, net_revenue) * pg_rate
@@ -302,13 +305,13 @@ def detect_price_anomalies(enriched_rows):
 def detect_discount_anomalies(enriched_rows):
     """
     상품(주문 내 품목) 단위 할인율 이상감지 (25% 초과) 및 구간별 집계.
-    할인율 = (상품별할인 + 배분된 쿠폰 + 배분된 등급할인) / 상품구매금액 × 100
+    할인율 = (상품별할인 + 배분쿠폰 + 배분등급 + 배분적립금 + 배분예치금) / 상품구매금액 × 100
 
     주문서 쿠폰·회원등급 할인은 주문 전체에 1건만 부과되지만 CSV 는 모든 품목 행에
     같은 금액을 반복 기재한다(예: 2품목 주문에 9,200원 쿠폰이 두 행 모두 9,200).
     그대로 합산하면 중복되므로, preprocess_rows 가 판매가(상품구매금액) 비율로
-    배분해 둔 _disc_for_anomaly(상품별할인 + 배분쿠폰 + 배분등급)를 그대로 사용한다.
-    적립금·예치금은 순수 할인이 아니라 _disc_for_anomaly 에서 이미 제외돼 있다.
+    배분해 둔 _disc_for_anomaly(상품별할인 + 배분쿠폰 + 배분등급 + 배분적립금 + 배분예치금)를
+    그대로 사용한다. 적립금·예치금도 실제 미수금이므로 총할인에 포함한다.
 
     이전에는 주문 단위로 합산해 첫 품목 이름만 붙였더니, 다품목 주문이
     엉뚱한 한 상품에 주문 전체 금액으로 표시됐다. 이제 품목별로 평가한다.
@@ -1739,7 +1742,7 @@ def generate_html(data, price_anomalies, outlet_items, discount_over, discount_b
     dep    = ds.get("deposit",   0.0)
     nvr    = ds.get("naver_pt",  0.0)
     d_qty  = ds.get("qty",       0.0)
-    tot_disc = coup + grade + pdisc
+    tot_disc = coup + grade + pdisc + pts + dep
     disc_pct = (tot_disc / pur * 100) if pur else 0.0
     pg_pct   = (total_pg / total_rev * 100) if total_rev else 0.0
 
@@ -1766,9 +1769,9 @@ def generate_html(data, price_anomalies, outlet_items, discount_over, discount_b
     <div class="ds-group-label">매출 흐름</div>
     <div class="ds-grid ds-grid-main">
       {dscard("총 주문금액",  f"{pur:,.0f}원",       cls="ds-c-neutral")}
-      {dscard("총 할인금액",  f"{tot_disc:,.0f}원",  sub=f"쿠폰+등급+추가할인 | {disc_pct:.1f}% 할인",
+      {dscard("총 할인금액",  f"{tot_disc:,.0f}원",  sub=f"쿠폰+등급+추가할인+적립금+예치금 | {disc_pct:.1f}% 할인",
               cls="ds-c-discount")}
-      {dscard("순매출",      f"{total_rev:,.0f}원",  sub="구매금액 − 쿠폰·등급·추가할인",
+      {dscard("순매출",      f"{total_rev:,.0f}원",  sub="구매금액 − 쿠폰·등급·추가할인·적립금·예치금",
               cls="ds-c-rev")}
       {dscard("공급원가",    f"{total_cost:,.0f}원",  cls="ds-c-cost")}
       {dscard("마진",        f"{total_m:,.0f}원",    sub=f"마진율 {total_rate:.1f}%",
@@ -1791,8 +1794,8 @@ def generate_html(data, price_anomalies, outlet_items, discount_over, discount_b
       {dscard("쿠폰 할인",       f"{coup:,.0f}원",  sub=_pct(coup),  cls="ds-c-discount")}
       {dscard("회원등급 할인",   f"{grade:,.0f}원", sub=_pct(grade), cls="ds-c-discount")}
       {dscard("상품별 추가할인", f"{pdisc:,.0f}원", sub=_pct(pdisc), cls="ds-c-discount")}
-      {dscard("적립금 사용",           f"{pts:,.0f}원", sub="결제수단 — 순매출 미포함", cls="ds-c-neutral")}
-      {dscard("예치금 사용",           f"{dep:,.0f}원", sub="결제수단 — 순매출 미포함", cls="ds-c-neutral")}
+      {dscard("적립금 사용",           f"{pts:,.0f}원", sub="할인 포함 — 순매출에서 차감", cls="ds-c-discount")}
+      {dscard("예치금 사용",           f"{dep:,.0f}원", sub="할인 포함 — 순매출에서 차감", cls="ds-c-discount")}
       {dscard("네이버포인트",            f"{nvr:,.0f}원", sub="결제수단/적립 — 순매출 미포함", cls="ds-c-neutral")}
     </div>
   </div>

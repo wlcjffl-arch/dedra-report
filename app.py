@@ -609,7 +609,7 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
     dep   = ds.get("deposit", 0.0)
     nvr   = ds.get("naver_pt", 0.0)
     qty   = ds.get("qty", 0.0)
-    tot_disc = coup + grade + pdisc
+    tot_disc = coup + grade + pdisc + pts + dep
 
     gross    = refund["amount_all"]      # 환불 전 총 주문금액
     ref_amt  = refund["amount_ref"]      # 환불 금액
@@ -625,8 +625,8 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
         "refund": "주문 상태가 <b>취소 요청 / 교환 신청 / 반품 요청 / 반품 완료-환불완료</b> 인 행의 <code>상품구매금액</code> 합계입니다. (‘반품 처리중-수거전’은 환불 확정 전이라 별도 ‘반품 진행중’으로 집계)",
         "rate": "<b>환불율(금액) = 환불 금액 ÷ 환불 전 총 주문금액 × 100</b><br><b>환불율(건수) = 환불 건수 ÷ 전체 주문 건수 × 100</b>",
         "netpur": "환불 전 총 주문금액에서 환불 금액을 뺀, 실제 유효 주문(정상 + 반품진행중)의 <code>상품구매금액</code> 합계입니다. <b>환불 후 주문금액 = 환불 전 − 환불</b>",
-        "disc": "<b>쿠폰 + 회원등급 추가할인 + 상품별 추가할인</b>의 합계입니다. 적립금·예치금은 결제수단이라 할인에서 제외합니다. 주문서 쿠폰·등급 할인은 주문 내 품목에 상품구매금액 비율로 배분해 합산합니다.",
-        "rev": "<b>순매출 = 환불 후 주문금액 − 총 할인(쿠폰·등급·상품)</b>. 적립금·예치금·네이버페이 포인트는 결제수단/적립이라 매출에 포함하지 않습니다. (네이버페이 주문은 상품구매금액을 포인트로 결제한 것이라 이미 주문금액에 반영돼 있어 다시 더하지 않습니다.)",
+        "disc": "<b>쿠폰 + 회원등급 추가할인 + 상품별 추가할인 + 결제 적립금 사용액 + 예치금 사용액</b>의 합계입니다. 적립금·예치금은 실제로 받지 못한 금액이라 할인에 포함합니다. (네이버페이 포인트는 결제수단/적립이라 제외) 주문서 쿠폰·등급 할인은 주문 내 품목에 상품구매금액 비율로 배분해 합산합니다.",
+        "rev": "<b>순매출 = 환불 후 주문금액 − 총 할인(쿠폰·등급·상품·적립금·예치금)</b>. 네이버페이 포인트는 결제수단/적립이라 매출에 포함하지 않습니다. (네이버페이 주문은 상품구매금액을 포인트로 결제한 것이라 이미 주문금액에 반영돼 있어 다시 더하지 않습니다.)",
         "cost": "각 주문 품목의 <b>공급원가(단가) × 수량</b> 합계입니다. (취소·반품 제외)",
         "margin": "<b>마진 = 순매출 − 공급원가</b>, <b>마진율 = 마진 ÷ 순매출 × 100</b>",
         "pg": "결제수단별 <b>순매출 × PG 수수료율</b>의 합계입니다. 수수료율은 결제업체·결제수단 조합에 따라 적용됩니다.",
@@ -691,7 +691,8 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
         # 총 할인: 할인 유형(쿠폰/등급/상품)별 → 주문번호 드릴다운
         if key == "disc":
             comps = [("쿠폰 할인", "_alloc_coupon"), ("회원등급 할인", "_alloc_grade"),
-                     ("상품 즉시 할인", "_disc_product")]
+                     ("상품 즉시 할인", "_disc_product"),
+                     ("결제 적립금 사용", "_alloc_points"), ("예치금 사용", "_alloc_deposit")]
             fld_of = dict(comps)
             if total_mode:
                 rows = [{
@@ -702,11 +703,15 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
                     "쿠폰할인(원)": round(r.get("_alloc_coupon", 0.0)),
                     "등급할인(원)": round(r.get("_alloc_grade", 0.0)),
                     "상품할인(원)": round(r.get("_disc_product", 0.0)),
+                    "적립금(원)": round(r.get("_alloc_points", 0.0)),
+                    "예치금(원)": round(r.get("_alloc_deposit", 0.0)),
                     "상품구매금액(원)": round(safe_float(r.get("상품구매금액"))),
                     "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
                     "상태": r.get("주문 상태", "").strip(),
                 } for r in enriched if not r.get("_skip")
-                  and (r.get("_alloc_coupon", 0.0) + r.get("_alloc_grade", 0.0) + r.get("_disc_product", 0.0)) > 0]
+                  and (r.get("_alloc_coupon", 0.0) + r.get("_alloc_grade", 0.0)
+                       + r.get("_disc_product", 0.0) + r.get("_alloc_points", 0.0)
+                       + r.get("_alloc_deposit", 0.0)) > 0]
                 st.markdown(f"##### 할인 적용 주문 전체 · {len(rows):,}건")
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 return
@@ -816,7 +821,7 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
                     val_color="#ef4444", note=f"환불율 {rate_amt:.1f}% · {refund['refund_cnt']:,}건/{refund['total_cnt']:,}건")
         + _flow_row("환불 후 총 주문금액 (C = A − B)", fmt_won(net_pur), strong=True,
                     border="2px solid #cbd5e1")
-        + _flow_row("총 할인 (쿠폰·등급·상품) (D)", fmt_won(tot_disc), indent=True, op="−",
+        + _flow_row("총 할인 (쿠폰·등급·상품·적립금·예치금) (D)", fmt_won(tot_disc), indent=True, op="−",
                     val_color="#f59e0b", note=f"주문금액 대비 {disc_pct:.1f}%")
         + _flow_row("순매출 (E = C − D)", fmt_won(total_rev), strong=True,
                     val_color="#4f46e5", border="2px solid #cbd5e1")
@@ -847,8 +852,8 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
     </div>
     <div class="kpi-grid g3">
         {kpi_card("네이버페이 포인트", fmt_won(nvr), "결제수단/적립 · 매출 미포함")}
-        {kpi_card("결제 적립금 사용액", fmt_won(pts), "결제수단 · 매출 미포함")}
-        {kpi_card("예치금 사용액", fmt_won(dep), "결제수단 · 매출 미포함")}
+        {kpi_card("결제 적립금 사용액", fmt_won(pts), "할인 포함 · 순매출에서 차감")}
+        {kpi_card("예치금 사용액", fmt_won(dep), "할인 포함 · 순매출에서 차감")}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1364,21 +1369,25 @@ def main():
         grade = ds.get("grade", 0.0)
         pdisc = ds.get("prod_disc", 0.0)
         pts   = ds.get("points", 0.0)
+        dep   = ds.get("deposit", 0.0)
         nvr   = ds.get("naver_pt", 0.0)
-        tot_disc = coup + grade + pdisc
+        tot_disc = coup + grade + pdisc + pts + dep
         disc_pct = (tot_disc / pur * 100) if pur else 0.0
 
         st.markdown(f"""
         <div class="kpi-grid g4">
             {kpi_card("총 주문액 (소비자가)", fmt_won(pur), "할인 전 원금")}
             {kpi_card("총 할인 지원액", fmt_won(tot_disc), f"평균 할인율 {disc_pct:.1f}%", "accent-amber")}
-            {kpi_card("결제 적립금 사용액", fmt_won(pts), "매출 분석 제외")}
+            {kpi_card("결제 적립금 사용액", fmt_won(pts), "할인 포함 · 순매출 차감")}
             {kpi_card("네이버페이 포인트", fmt_won(nvr), "결제수단/적립 · 매출 미포함")}
         </div>
         <div class="kpi-grid g3">
             {kpi_card("쿠폰 할인 상세", fmt_won(coup), f"원금 대비 {(coup/pur*100) if pur else 0:.1f}%")}
             {kpi_card("회원등급 할인 상세", fmt_won(grade), f"원금 대비 {(grade/pur*100) if pur else 0:.1f}%")}
             {kpi_card("상품 즉시 할인 상세", fmt_won(pdisc), f"원금 대비 {(pdisc/pur*100) if pur else 0:.1f}%")}
+        </div>
+        <div class="kpi-grid g2">
+            {kpi_card("예치금 사용액", fmt_won(dep), f"원금 대비 {(dep/pur*100) if pur else 0:.1f}%")}
         </div>
         """, unsafe_allow_html=True)
 
