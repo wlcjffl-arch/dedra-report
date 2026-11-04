@@ -2,7 +2,7 @@
 데드라 마진 리포트 — Streamlit 웹 앱 Premium v3
 """
 
-import io, csv, sys, os
+import io, csv, sys, os, hashlib
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -30,11 +30,10 @@ st.set_page_config(
 # ── 프리미엄 CSS 스타일링 ──────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Noto+Sans+KR:wght@300;400;500;700&display=swap');
 
 /* 전체 글꼴 및 톤앤매너 */
 html, body, [class*="css"] {
-    font-family: 'Plus Jakarta Sans', 'Noto Sans KR', sans-serif !important;
+    font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif !important;
 }
 
 [data-testid="stAppViewContainer"] {
@@ -367,10 +366,9 @@ def parse_csv(f):
 # 정렬 iframe 안에 주입할 테이블 CSS (메인 페이지 스타일을 그대로 복제).
 # iframe 은 스타일이 격리되므로 표 디자인을 유지하려면 여기에 다시 넣어야 한다.
 _TABLE_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap');
 * { box-sizing: border-box; }
 html, body { margin:0; padding:0; background:#f8fafc;
-    font-family:'Plus Jakarta Sans','Noto Sans KR',sans-serif; }
+    font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif; }
 .custom-table-wrapper { background:white; border-radius:16px; border:1px solid #e2e8f0;
     box-shadow:0 4px 6px -1px rgba(15,23,42,0.02); max-height:460px; overflow:auto; margin-bottom:16px; }
 .custom-table { width:100%; border-collapse:collapse; text-align:left; }
@@ -1017,11 +1015,34 @@ def sidebar():
 
 
 # ── 메인 화면 ──────────────────────────────────────────────────
+def analyze_uploads(payloads):
+    """업로드를 한 번 분석한다. 결과는 호출자가 세션에만 보관한다."""
+    all_rows, file_names, skipped = [], [], []
+    for name, raw in payloads:
+        if name in file_names:
+            skipped.append(name)
+            continue
+        rows = parse_csv(io.BytesIO(raw))
+        if rows:
+            all_rows.extend(rows)
+            file_names.append(name)
+    enriched = preprocess_rows(all_rows)
+    data = aggregate(enriched)
+    price_anomalies, outlet_items = detect_price_anomalies(enriched)
+    discount_over, discount_buckets, discount_bucket_products = detect_discount_anomalies(enriched)
+    refund = compute_refund_stats(enriched)
+    return (all_rows, file_names, skipped, enriched, data, price_anomalies,
+            outlet_items, discount_over, discount_buckets, discount_bucket_products,
+            refund, datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+
 def main():
     if not check_password(): return
     uploaded = sidebar()
 
     if not uploaded:
+        st.session_state.pop("_analysis", None)
+        st.session_state.pop("_report_html", None)
         st.markdown("""
         <div style="text-align:center;padding:120px 0;background:white;border-radius:24px;border:1px dashed #cbd5e1;margin-top:20px;">
             <div style="font-size:64px;margin-bottom:20px;">📂</div>
@@ -1033,30 +1054,27 @@ def main():
         """, unsafe_allow_html=True)
         return
 
-    # 데이터 처리 — 같은 파일명은 한 번만 반영(중복 업로드 시 이중 합산 방지)
-    all_rows, file_names, skipped = [], [], []
-    for f in uploaded:
-        if f.name in file_names:
-            skipped.append(f.name)
-            continue
-        rows = parse_csv(f)
-        if rows:
-            all_rows.extend(rows)
-            file_names.append(f.name)
-
+    # 현재 세션의 최신 업로드만 보관. 파일 내용이 바뀌면 분석도 새로 수행한다.
+    payloads = [(f.name, f.getvalue()) for f in uploaded]
+    signature = tuple((name, hashlib.sha256(raw).digest()) for name, raw in payloads)
+    cached = st.session_state.get("_analysis")
+    if cached is None or cached["signature"] != signature:
+        st.session_state.pop("_analysis", None)
+        st.session_state.pop("_report_html", None)
+        with st.spinner("주문 내역 정밀 마진 분석 중..."):
+            result = analyze_uploads(payloads)
+        st.session_state["_analysis"] = {"signature": signature, "result": result}
+    else:
+        result = cached["result"]
+    del payloads
+    (all_rows, file_names, skipped, enriched, data, price_anomalies,
+     outlet_items, discount_over, discount_buckets, discount_bucket_products,
+     refund, generated_at) = result
     if not all_rows:
         premium_banner("err", "파일 데이터를 읽을 수 없습니다. 인코딩 형식을 확인해 주세요.")
         return
-
     if skipped:
         premium_banner("warn", f"중복된 파일명은 한 번만 반영했습니다: {', '.join(sorted(set(skipped)))}")
-
-    with st.spinner("주문 내역 정밀 마진 분석 중..."):
-        enriched = preprocess_rows(all_rows)
-        data = aggregate(enriched)
-        price_anomalies, outlet_items = detect_price_anomalies(enriched)
-        discount_over, discount_buckets, discount_bucket_products = detect_discount_anomalies(enriched)
-        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # 상단 대시보드 헤더
     n = data["normal"]
@@ -1071,7 +1089,6 @@ def main():
     ds = data.get("ds", {})
 
     # 환불 통계 (취소/반품완료 = _skip, 반품진행중 별도) — 종합일보·환불 탭 공용
-    refund = compute_refund_stats(enriched)
 
     st.markdown(f"""
     <div class="dashboard-header">
@@ -1090,19 +1107,21 @@ def main():
     with col_info:
         premium_banner("ok", f"분석 성공: {' / '.join(file_names)}")
     with col_dl:
-        html_content = generate_html(
-            data, price_anomalies, outlet_items,
-            discount_over, discount_buckets,
-            file_names[0] if file_names else "upload.csv",
-            generated_at, enriched_rows=enriched
-        )
-        st.download_button(
-            "⬇️ 원본 HTML 보고서 다운로드",
-            data=html_content.encode("utf-8"),
-            file_name=f"{datetime.now().strftime('%Y%m%d')}_마진리포트.html",
-            mime="text/html",
-            use_container_width=True,
-        )
+        if "_report_html" not in st.session_state:
+            if st.button("📄 다운로드 보고서 준비", use_container_width=True):
+                with st.spinner("보고서 생성 중..."):
+                    st.session_state["_report_html"] = generate_html(
+                        data, price_anomalies, outlet_items,
+                        discount_over, discount_buckets, file_names[0],
+                        generated_at, enriched_rows=enriched,
+                    ).encode("utf-8")
+        if "_report_html" in st.session_state:
+            st.download_button(
+                "⬇️ 원본 HTML 보고서 다운로드",
+                data=st.session_state["_report_html"],
+                file_name=f"{generated_at[:10].replace('-', '')}_마진리포트.html",
+                mime="text/html", use_container_width=True,
+            )
 
     # ── 핵심 KPI 대형 카드 그리드 (7열) ─────────────────────────
     cost_pct = (total_cost / total_rev * 100) if total_rev else 0
@@ -1119,25 +1138,27 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── 대시보드 탭 레이아웃 ──────────────────────────────────────
-    t0, t6, t1, t2, t3, t4, t5 = st.tabs([
+    sections = [
         "📋 종합일보", "🔄 환불 분석",
         "📊 상세 마진 분석", "🔍 판매가 이상 감지", "🏷️ 할인율 입체 분석",
         "💳 PG 수수료 명세", "📦 아울렛 & 재고소진",
-    ])
+    ]
+    selected_section = st.radio("분석 메뉴", sections, horizontal=True,
+                                key="analysis_section", label_visibility="collapsed")
 
     # ── 탭 0: 종합일보 ────────────────────────────────────────
-    with t0:
+    if selected_section == sections[0]:
         render_overview(
             enriched, refund, ds, total_rev, total_cost, total_m, total_rate,
             total_pg, total_op, total_op_r,
         )
 
     # ── 탭 6: 환불 분석 ───────────────────────────────────────
-    with t6:
+    if selected_section == sections[1]:
         render_refunds(refund)
 
     # ── 탭 1: 상세 마진 분석 ──────────────────────────────────
-    with t1:
+    if selected_section == sections[2]:
         # 일반 / 재고소진 마진 성과 비교
         col_n, col_c = st.columns(2)
         with col_n:
@@ -1247,7 +1268,7 @@ def main():
                 render_html(empty_msg)
 
     # ── 탭 2: 판매가 이상 감지 ────────────────────────────────
-    with t2:
+    if selected_section == sections[3]:
         col1, col2 = st.columns(2)
         with col1:
             section_title("이상 판매가 탐지 내역 (정가 미달 등)")
@@ -1363,7 +1384,7 @@ def main():
             """)
 
     # ── 탭 3: 할인율 입체 분석 ────────────────────────────────
-    with t3:
+    if selected_section == sections[4]:
         pur   = ds.get("purchase", 0.0)
         coup  = ds.get("coupon", 0.0)
         grade = ds.get("grade", 0.0)
@@ -1457,7 +1478,7 @@ def main():
                 """)
 
     # ── 탭 4: PG 수수료 명세 ──────────────────────────────────
-    with t4:
+    if selected_section == sections[5]:
         pg_by = data.get("pg_by_payment", {})
         pg_pct = (total_pg / total_rev * 100) if total_rev else 0
 
@@ -1543,7 +1564,7 @@ def main():
         """, unsafe_allow_html=True)
 
     # ── 탭 5: 아울렛 & 재고소진 ────────────────────────────────
-    with t5:
+    if selected_section == sections[6]:
         for cat in ["아울렛", "▶균일가 모음전◀"]:
             cat_stat = data["cat_clearance"].get(cat)
             if not cat_stat: continue
