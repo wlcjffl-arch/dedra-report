@@ -346,6 +346,9 @@ def detect_discount_anomalies(enriched_rows):
             "판매가": purchase,
             "원가": r.get("_cost", 0.0),
             "할인금액": discount,
+            "쿠폰할인": r.get("_alloc_coupon", 0.0),
+            "회원등급할인": r.get("_alloc_grade", 0.0),
+            "즉시할인": r.get("_disc_product", 0.0),
             "할인율": disc_rate,
             "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
             "할인상세": r.get("상품별 추가할인 상세", "").strip(),
@@ -731,6 +734,9 @@ def build_discount_anomaly_html(over_threshold, buckets):
                 f'<td>{o["판매카테고리"]}</td>'
                 f'<td class="num">{fmt_won(o["판매가"])}</td>'
                 f'<td class="num">{fmt_won(o["원가"])}</td>'
+                f'<td class="num">{fmt_won(o["쿠폰할인"])}</td>'
+                f'<td class="num">{fmt_won(o["회원등급할인"])}</td>'
+                f'<td class="num">{fmt_won(o["즉시할인"])}</td>'
                 f'<td class="num warn-val">{fmt_won(o["할인금액"])}</td>'
                 f'<td class="num warn-val"><b>{fmt_rate(o["할인율"])}</b></td>'
                 f'<td>{o["쿠폰명"]}</td>'
@@ -742,7 +748,7 @@ def build_discount_anomaly_html(over_threshold, buckets):
         <div class="table-wrap"><table>
             <thead><tr>
                 <th>주문번호</th><th>상품명</th><th>브랜드</th><th>판매카테고리</th>
-                <th>판매가</th><th>원가</th><th>할인금액</th><th>할인율</th><th>쿠폰명</th><th>상품별 추가할인 상세</th>
+                <th>판매가</th><th>원가</th><th>쿠폰 할인</th><th>회원등급 할인</th><th>즉시할인</th><th>할인금액</th><th>할인율</th><th>쿠폰명</th><th>상품별 추가할인 상세</th>
             </tr></thead>
             <tbody>{order_rows}</tbody>
         </table></div>"""

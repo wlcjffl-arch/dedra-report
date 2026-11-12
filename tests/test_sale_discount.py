@@ -39,6 +39,13 @@ class SaleDiscountTests(unittest.TestCase):
         self.assertEqual(products["11~15%"][0]["할인율"], 12.5)
         self.assertEqual(len(over), 1)
         self.assertEqual(over[0]["할인율"], 32.5)
+        self.assertEqual(over[0]["쿠폰할인"], 375)
+        self.assertEqual(over[0]["회원등급할인"], 375)
+        self.assertEqual(over[0]["즉시할인"], 9000)
+        for items in products.values():
+            for item in items:
+                self.assertEqual(item["쿠폰할인"] + item["회원등급할인"] + item["즉시할인"],
+                                 item["할인금액"])
         self.assertEqual(sum(r["_disc_for_anomaly"] for r in enriched), 11000)
         self.assertEqual(sum(r["_net_revenue"] for r in enriched), 27500)
 
