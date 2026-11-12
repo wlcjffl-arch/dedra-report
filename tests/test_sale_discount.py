@@ -1,9 +1,26 @@
 import unittest
 
-from dedra_daily_report import preprocess_rows, detect_discount_anomalies
+from dedra_daily_report import preprocess_rows, detect_discount_anomalies, build_discount_detail_html
 
 
 class SaleDiscountTests(unittest.TestCase):
+    def test_detail_preserves_titles_and_app_evidence_per_product(self):
+        rows = [self.row(**{"상품별 추가할인 상세": "겨울 세일 <10%>",
+                            "사용한 쿠폰명": "VIP <쿠폰>", "앱상품할인금액": "500"}),
+                self.row(**{"상품별 추가할인 상세": "다른 상품 할인"})]
+        _, _, groups = detect_discount_anomalies(preprocess_rows(rows))
+        items = [item for group in groups.values() for item in group]
+        first = next(item for item in items if item["할인상세"] == "겨울 세일 <10%>")
+        rendered = build_discount_detail_html(first)
+        self.assertIn("겨울 세일 &lt;10%&gt;", rendered)
+        self.assertIn("VIP &lt;쿠폰&gt;", rendered)
+        self.assertIn("앱상품할인금액: 500", rendered)
+        self.assertNotIn("다른 상품 할인", rendered)
+        self.assertEqual(first["할인금액"], 1500)
+        missing = build_discount_detail_html({"주문번호": "T2"})
+        self.assertIn("CSV에 앱상품할인 별도 항목이 없습니다", missing)
+        self.assertIn("CSV에 쿠폰 이름이 제공되지 않았습니다", missing)
+
     def row(self, **changes):
         row = {
             "주문번호": "T1", "상품구매금액": "10000", "공급원가": "3000",

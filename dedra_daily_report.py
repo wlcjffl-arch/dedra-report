@@ -302,6 +302,36 @@ def detect_price_anomalies(enriched_rows):
     return anomalies, outlet_items
 
 
+def build_discount_detail_html(item):
+    """Expand the selected product's CSV evidence without inventing missing detail."""
+    def esc(value):
+        return html.escape(str(value), quote=True)
+
+    def field(label, value):
+        return (f'<div style="margin:8px 0"><b>{esc(label)}</b><br>'
+                f'<span style="white-space:pre-wrap">{esc(value)}</span></div>')
+
+    raw = item.get("할인원본", {})
+    app_fields = {k: v for k, v in raw.items()
+                  if ("앱" in k or "모바일" in k) and "할인" in k}
+    app_text = "\n".join(f"{k}: {v or '값 없음'}" for k, v in app_fields.items())
+    if not app_text:
+        app_text = "CSV에 앱상품할인 별도 항목이 없습니다. 아래 상품별 추가할인 상세 원문에 포함되어 있는지 확인해 주세요."
+    detail = field("상품", item.get("상품명", ""))
+    detail += field("상품별 할인금액", fmt_won(item.get("즉시할인", 0)))
+    detail += field("할인 제목·상세 (CSV 원문)", item.get("할인상세") or "CSV에 할인 제목·상세가 제공되지 않았습니다.")
+    detail += field("앱상품할인", app_text)
+    detail += field("회원등급 할인 (상품 배분액)", fmt_won(item.get("회원등급할인", 0)))
+    detail += field("쿠폰 할인 (상품 배분액)", fmt_won(item.get("쿠폰할인", 0)))
+    detail += field("쿠폰 이름 (CSV 원문)", item.get("쿠폰명") or "CSV에 쿠폰 이름이 제공되지 않았습니다.")
+    detail += '<p style="color:#64748b;font-size:12px">쿠폰·회원등급 할인은 주문 내 상품구매금액 비율로 배분한 금액입니다. 여러 쿠폰의 개별 금액과 앱할인 포함 관계는 CSV 원문에 제공된 범위에서만 확인할 수 있습니다.</p>'
+    detail += '<details><summary>할인 관련 CSV 원본 항목 전체 보기</summary>'
+    detail += ''.join(field(k, v or "값 없음") for k, v in raw.items())
+    detail += '</details>'
+    return (f'<details class="discount-detail"><summary style="cursor:pointer;color:#4f46e5;font-weight:600;white-space:nowrap">{esc(item.get("주문번호", ""))}</summary>'
+            f'<div style="min-width:320px;max-width:480px;padding:12px;background:#f1f5f9;border-radius:8px;overflow-wrap:anywhere;font-weight:400;color:#334155">{detail}</div></details>')
+
+
 def detect_discount_anomalies(enriched_rows):
     """
     상품(주문 내 품목) 단위 할인율 이상감지 (25% 초과) 및 구간별 집계.
@@ -352,6 +382,8 @@ def detect_discount_anomalies(enriched_rows):
             "할인율": disc_rate,
             "쿠폰명": r.get("사용한 쿠폰명", "").strip(),
             "할인상세": r.get("상품별 추가할인 상세", "").strip(),
+            "할인원본": {str(k): str(v or "").strip() for k, v in r.items()
+                         if k and not k.startswith("_") and ("할인" in k or "쿠폰" in k)},
         })
 
     # 각 구간을 할인율 높은 순으로 정렬

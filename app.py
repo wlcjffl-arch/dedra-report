@@ -17,6 +17,7 @@ from dedra_daily_report import (
 from dedra_daily_report import (
     recovery_rate, compute_refund_stats,
     safe_float, parse_brand, PENDING_STATUS,
+    build_discount_detail_html,
 )
 
 # ── 페이지 설정 ───────────────────────────────────────────────
@@ -403,7 +404,7 @@ document.querySelectorAll('table.custom-table').forEach(function(table){
           var s=h.querySelector('.sort-ind'); if(s) s.textContent=''; }
       });
       th.setAttribute('data-asc', asc ? 'true' : 'false');
-      function txt(r){ var c=r.children[idx]; return c ? c.textContent.trim() : ''; }
+      function txt(r){ var c=r.children[idx]; if(!c) return ''; var detail=c.querySelector('.discount-detail > summary'); return (detail || c).textContent.trim(); }
       function num(v){
         var c=v.replace(/[^0-9.\\-]/g,'');
         if(c===''||c==='-'||c==='.') return null;
@@ -1056,7 +1057,7 @@ def main():
 
     # 현재 세션의 최신 업로드만 보관. 파일 내용이 바뀌면 분석도 새로 수행한다.
     payloads = [(f.name, f.getvalue()) for f in uploaded]
-    signature = ("sale-discount-v3", tuple((name, hashlib.sha256(raw).digest()) for name, raw in payloads))
+    signature = ("sale-discount-v4", tuple((name, hashlib.sha256(raw).digest()) for name, raw in payloads))
     cached = st.session_state.get("_analysis")
     if cached is None or cached["signature"] != signature:
         st.session_state.pop("_analysis", None)
@@ -1432,6 +1433,7 @@ def main():
             sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
             items = discount_bucket_products.get(sel_bucket, [])
             section_title(f"‘{sel_bucket}’ 구간 상품 (할인율 높은 순 · {len(items)}건)")
+            st.caption("주문번호를 클릭하면 해당 상품의 할인 제목·앱상품할인·쿠폰 이름과 금액이 펼쳐집니다.")
             st.caption("쿠폰·회원등급 할인은 주문 내 상품구매금액 비율로 배분한 금액입니다. 쿠폰 + 회원등급 + 즉시할인 = 할인액이며, 표시 금액은 원 단위 반올림으로 합계에 차이가 날 수 있습니다.")
             if sel_bucket == "25% 초과" and items:
                 premium_banner("warn", f"25%를 초과하는 고할인율 상품이 {len(items)}건 발견되었습니다.")
@@ -1444,7 +1446,7 @@ def main():
                     rc = "#ef4444" if rr > 25 else "#f59e0b" if rr > 15 else "#64748b"
                     rows.append(f"""
                     <tr>
-                        <td style="font-weight:600;color:#4f46e5;">{o['주문번호']}</td>
+                        <td>{build_discount_detail_html(o)}</td>
                         <td>{o['상품명']}</td>
                         <td style="color:#64748b;">{o['브랜드']}</td>
                         <td style="color:#64748b;">{o['판매카테고리']}</td>
