@@ -126,7 +126,7 @@ def preprocess_rows(rows):
     사용한 뒤 상품구매금액 비율로 배분.
 
     순매출(메인) = 구매금액 - 상품별할인 - 쿠폰 - 등급할인 - 적립금 - 예치금
-    총할인(=이상감지용) = 상품별할인 + 쿠폰 + 등급할인 + 적립금 + 예치금
+    세일 할인(이상감지용) = 상품별할인 + 쿠폰 + 등급할인
     (네이버포인트는 결제수단/적립이므로 계속 제외)
     """
     # 1차 패스: 주문별 총 구매금액 & 첫 행 정보 수집 (취소/교환 포함 전체)
@@ -178,7 +178,7 @@ def preprocess_rows(rows):
         total_discount   = (disc_product + alloc_coupon + alloc_grade
                             + alloc_points + alloc_deposit)
         net_revenue      = purchase - total_discount
-        disc_for_anomaly = total_discount
+        disc_for_anomaly = disc_product + alloc_coupon + alloc_grade
 
         pg_name, pg_rate = get_pg_info(fi.get("pg_co", ""), fi.get("pay", ""))
         pg_fee = max(0.0, net_revenue) * pg_rate
@@ -305,13 +305,13 @@ def detect_price_anomalies(enriched_rows):
 def detect_discount_anomalies(enriched_rows):
     """
     상품(주문 내 품목) 단위 할인율 이상감지 (25% 초과) 및 구간별 집계.
-    할인율 = (상품별할인 + 배분쿠폰 + 배분등급 + 배분적립금 + 배분예치금) / 상품구매금액 × 100
+    할인율 = (상품별할인 + 배분쿠폰 + 배분등급) / 상품구매금액 × 100
 
     주문서 쿠폰·회원등급 할인은 주문 전체에 1건만 부과되지만 CSV 는 모든 품목 행에
     같은 금액을 반복 기재한다(예: 2품목 주문에 9,200원 쿠폰이 두 행 모두 9,200).
     그대로 합산하면 중복되므로, preprocess_rows 가 판매가(상품구매금액) 비율로
-    배분해 둔 _disc_for_anomaly(상품별할인 + 배분쿠폰 + 배분등급 + 배분적립금 + 배분예치금)를
-    그대로 사용한다. 적립금·예치금도 실제 미수금이므로 총할인에 포함한다.
+    배분해 둔 _disc_for_anomaly(상품별할인 + 배분쿠폰 + 배분등급)를
+    그대로 사용한다. 결제 적립금·예치금은 세일 할인율에서 제외한다.
 
     이전에는 주문 단위로 합산해 첫 품목 이름만 붙였더니, 다품목 주문이
     엉뚱한 한 상품에 주문 전체 금액으로 표시됐다. 이제 품목별로 평가한다.
@@ -752,7 +752,7 @@ def build_discount_anomaly_html(over_threshold, buckets):
     return f"""
     <div class="{section_class} section">
         <h2>{icon} 할인율 이상감지</h2>
-        <p class="warn-desc" style="margin-bottom:12px">기준: 총 할인액 / 상품구매금액 × 100 &nbsp;|&nbsp; 경고 기준: 25% 초과</p>
+        <p class="warn-desc" style="margin-bottom:12px">기준: (쿠폰 + 회원등급 + 상품 즉시할인) / 상품구매금액 × 100 · 결제 적립금·예치금 제외 &nbsp;|&nbsp; 경고 기준: 25% 초과</p>
         <div class="table-wrap"><table style="max-width:500px">
             <thead><tr><th>할인율 구간</th><th>건수</th><th>비율</th><th>분포</th></tr></thead>
             <tbody>{bucket_rows}</tbody>

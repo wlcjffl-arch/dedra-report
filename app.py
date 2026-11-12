@@ -1056,7 +1056,7 @@ def main():
 
     # 현재 세션의 최신 업로드만 보관. 파일 내용이 바뀌면 분석도 새로 수행한다.
     payloads = [(f.name, f.getvalue()) for f in uploaded]
-    signature = tuple((name, hashlib.sha256(raw).digest()) for name, raw in payloads)
+    signature = ("sale-discount-v2", tuple((name, hashlib.sha256(raw).digest()) for name, raw in payloads))
     cached = st.session_state.get("_analysis")
     if cached is None or cached["signature"] != signature:
         st.session_state.pop("_analysis", None)
@@ -1392,14 +1392,14 @@ def main():
         pts   = ds.get("points", 0.0)
         dep   = ds.get("deposit", 0.0)
         nvr   = ds.get("naver_pt", 0.0)
-        tot_disc = coup + grade + pdisc + pts + dep
+        tot_disc = coup + grade + pdisc
         disc_pct = (tot_disc / pur * 100) if pur else 0.0
 
         st.markdown(f"""
         <div class="kpi-grid g4">
             {kpi_card("총 주문액 (소비자가)", fmt_won(pur), "할인 전 원금")}
-            {kpi_card("총 할인 지원액", fmt_won(tot_disc), f"평균 할인율 {disc_pct:.1f}%", "accent-amber")}
-            {kpi_card("결제 적립금 사용액", fmt_won(pts), "할인 포함 · 순매출 차감")}
+            {kpi_card("세일 할인 합계", fmt_won(tot_disc), f"평균 할인율 {disc_pct:.1f}%", "accent-amber")}
+            {kpi_card("결제 적립금 사용액", fmt_won(pts), "할인율 제외 · 순매출 차감")}
             {kpi_card("네이버페이 포인트", fmt_won(nvr), "결제수단/적립 · 매출 미포함")}
         </div>
         <div class="kpi-grid g3">
@@ -1408,14 +1408,14 @@ def main():
             {kpi_card("상품 즉시 할인 상세", fmt_won(pdisc), f"원금 대비 {(pdisc/pur*100) if pur else 0:.1f}%")}
         </div>
         <div class="kpi-grid g2">
-            {kpi_card("예치금 사용액", fmt_won(dep), f"원금 대비 {(dep/pur*100) if pur else 0:.1f}%")}
+            {kpi_card("예치금 사용액", fmt_won(dep), "할인율 제외 · 순매출 차감")}
         </div>
         """, unsafe_allow_html=True)
 
         col_left, col_right = st.columns([1, 2])
         with col_left:
             section_title("상품별 할인율 구간 분포")
-            st.caption("구간을 클릭하면 오른쪽에 해당 상품이 할인율 높은 순으로 표시됩니다.")
+            st.caption("할인율 = (쿠폰 + 회원등급 + 상품 즉시할인) ÷ 상품구매금액 × 100. 결제 적립금·예치금은 제외합니다. 구간을 클릭하면 해당 상품을 확인할 수 있습니다.")
             sel_bucket = st.session_state.get("disc_bucket", "25% 초과")
             for k, v in discount_buckets.items():
                 is_sel = (k == sel_bucket)
