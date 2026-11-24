@@ -8,12 +8,27 @@ import csv
 import glob
 import html
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
 
 FOLDER = os.path.expanduser("~/Desktop/claude")
-SKIP_STATUSES = {"취소 요청", "교환 신청", "반품 요청", "반품 완료 - 환불완료"}
+# 카페24 주문 상태는 시기별로 띄어쓰기가 달라(예: "반품 완료 - 환불완료" → "반품완료 - 환불완료")
+# 공백을 모두 제거한 값으로 비교한다. normalize_status() 참고.
+SKIP_STATUSES = {
+    "취소 요청", "취소처리중 - 환불전", "취소완료", "입금전취소 - 관리자",
+    "교환 신청",
+    "반품 요청", "반품처리중 - 환불전", "반품 완료 - 환불완료",
+}
+
+
+def normalize_status(status):
+    """주문 상태 비교용 정규화: 앞뒤·중간 공백을 모두 제거."""
+    return re.sub(r"\s+", "", str(status or ""))
+
+
+SKIP_STATUSES_NORM = {normalize_status(s) for s in SKIP_STATUSES}
 CLEARANCE_CATS = {"아울렛", "▶균일가 모음전◀"}
 
 # 브랜드 분류 (CSV HTML 엔티티 디코딩 후 비교 — parse_brand() 사용)
@@ -154,7 +169,7 @@ def preprocess_rows(rows):
     for r in rows:
         r = dict(r)
         status = r.get("주문 상태", "").strip()
-        r["_skip"] = status in SKIP_STATUSES
+        r["_skip"] = normalize_status(status) in SKIP_STATUSES_NORM
 
         no = r.get("주문번호", "").strip()
         purchase = safe_float(r.get("상품구매금액"))
@@ -1529,6 +1544,11 @@ def build_unified_sales_section(enriched_rows):
 
 PENDING_STATUS = "반품 처리중 - 수거전"
 
+
+def is_pending_status(status):
+    """반품진행중(수거전) 여부 — 띄어쓰기 차이 무시."""
+    return normalize_status(status) == normalize_status(PENDING_STATUS)
+
 def compute_refund_stats(enriched_rows):
     """
     환불(취소/반품완료) 및 반품진행중 통계를 구조화 데이터로 집계.
@@ -1563,7 +1583,7 @@ def compute_refund_stats(enriched_rows):
         qty      = safe_float(r.get("수량"))
         status   = r.get("주문 상태", "").strip()
         is_ref   = bool(r.get("_skip", False))
-        is_pend  = (status == PENDING_STATUS)
+        is_pend  = is_pending_status(status)
 
         if prod not in prod_stats:
             prod_stats[prod] = {**new_stat(),

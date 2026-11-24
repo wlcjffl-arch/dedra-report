@@ -16,7 +16,7 @@ from dedra_daily_report import (
 )
 from dedra_daily_report import (
     recovery_rate, compute_refund_stats,
-    safe_float, parse_brand, PENDING_STATUS,
+    safe_float, parse_brand, PENDING_STATUS, is_pending_status,
     build_discount_detail_html,
 )
 
@@ -559,7 +559,7 @@ _METRICS = {
     "cost":    (lambda r: not r.get("_skip"),      lambda r: r.get("_cost", 0.0),                "공급원가(원)"),
     "margin":  (lambda r: not r.get("_skip"),      lambda r: r.get("_net_revenue", 0.0) - r.get("_cost", 0.0), "마진(원)"),
     "qty":     (lambda r: not r.get("_skip"),      lambda r: safe_float(r.get("수량")),          "수량"),
-    "pending": (lambda r: r.get("주문 상태", "").strip() == PENDING_STATUS,
+    "pending": (lambda r: is_pending_status(r.get("주문 상태", "")),
                 lambda r: safe_float(r.get("상품구매금액")), "진행중금액(원)"),
 }
 
@@ -621,7 +621,7 @@ def render_overview(enriched, refund, ds, total_rev, total_cost, total_m, total_
     # 지표별 상세 설명(산출 방식) — 클릭 시 팝업 상단에 표시.
     explains = {
         "gross": "업로드된 <b>모든 주문 행(취소·반품 포함)</b>의 <code>상품구매금액</code>을 합산한 값입니다. 할인 적용 전, 고객이 주문한 정가 기준 결제 금액이며 <b>환불 전 총 주문금액 = 환불 후 주문금액 + 환불 금액</b> 입니다.",
-        "refund": "주문 상태가 <b>취소 요청 / 교환 신청 / 반품 요청 / 반품 완료-환불완료</b> 인 행의 <code>상품구매금액</code> 합계입니다. (‘반품 처리중-수거전’은 환불 확정 전이라 별도 ‘반품 진행중’으로 집계)",
+        "refund": "주문 상태가 <b>취소(요청·처리중·완료·입금전취소) / 교환 신청 / 반품(요청·환불전·환불완료)</b> 인 행의 <code>상품구매금액</code> 합계입니다. (‘반품 처리중-수거전’은 환불 확정 전이라 별도 ‘반품 진행중’으로 집계)",
         "rate": "<b>환불율(금액) = 환불 금액 ÷ 환불 전 총 주문금액 × 100</b><br><b>환불율(건수) = 환불 건수 ÷ 전체 주문 건수 × 100</b>",
         "netpur": "환불 전 총 주문금액에서 환불 금액을 뺀, 실제 유효 주문(정상 + 반품진행중)의 <code>상품구매금액</code> 합계입니다. <b>환불 후 주문금액 = 환불 전 − 환불</b>",
         "disc": "<b>쿠폰 + 회원등급 추가할인 + 상품별 추가할인 + 결제 적립금 사용액 + 예치금 사용액</b>의 합계입니다. 적립금·예치금은 실제로 받지 못한 금액이라 할인에 포함합니다. (네이버페이 포인트는 결제수단/적립이라 제외) 주문서 쿠폰·등급 할인은 주문 내 품목에 상품구매금액 비율로 배분해 합산합니다.",
